@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 ProStaking contributors
+# Measured reference, with non-operational SITE placeholders. Not a drop-in installation.
+user = "sol"
+name = "SITE_VALIDATOR_NAME"
+telemetry = false
+[paths]
+base = "/SITE/validator/data"
+identity_key = "/SITE/validator/keys/identity.json"
+vote_account = "SITE_PUBLIC_VOTE_ACCOUNT"
+vote_history = "/SITE/validator/vote-history"
+[accounts]
+max_accounts = 200000000
+cache_size_gib = 12
+[layout]
+affinity = "auto"
+enable_block_production = true
+enable_snapshot_production = false
+net_tile_count = 1
+execrp_tile_count = 4
+snapdc_tile_count = 1
+snapin_tile_count = 1
+shred_tile_count = 2
+[tiles.gui]
+enabled = false
+[tiles.rpc]
+enabled = true
+rpc_listen_address = "127.0.0.1"
+rpc_listen_port = 8899
+
+[net]
+provider = "xdp"
+interface = "SITE_STANDALONE_X710_INTERFACE"
+bind_address = "192.0.2.10"
+[hugetlbfs]
+mount_path = "/SITE/hugetlbfs"
+[snapshots.server]
+enabled = false
+[tiles.metric]
+prometheus_listen_address = "127.0.0.1"
+
+[log]
+path = "/SITE/validator/data/logs/firedancer.log"
+[development]
+sandbox = true
+core_dump = "disabled"
+
+[consensus]
+expected_genesis_hash = "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY"
+alpenglow = true
+[snapshots.sources]
+servers = []
+[snapshots.sources.gossip]
+allow_any = false
+allow_list = ["SITE_TRUSTED_SNAPSHOT_PROVIDER"]
+
+[net.xdp]
+xdp_mode = "drv"
+native_bond = "false"
+xdp_zero_copy = "true"
+poll_mode = "softirq"
+rss_queue_mode = "simple"

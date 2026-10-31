@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 ProStaking contributors
+# Tested resource settings, not a complete unit. Example drop-in filename.
+# Host-specific: 128 GB Ryzen 7950X and the documented voting layout.
+[Service]
+LimitMEMLOCK=103079215104
+MemoryMax=111669149696
+CPUAffinity=1-15 17-31
+Restart=no

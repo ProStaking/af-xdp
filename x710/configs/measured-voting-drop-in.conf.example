@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 ProStaking contributors
+# Measured reference, with non-operational SITE placeholders. Not a drop-in installation.
+[Unit]
+ConditionPathExists=!/SITE/experiment/hold
+ConditionPathExists=!/SITE/experiment/fenced
+[Service]
+LimitMEMLOCK=96G
+MemoryMax=104G
+Restart=no

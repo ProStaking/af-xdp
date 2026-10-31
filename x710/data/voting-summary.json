@@ -1,0 +1,1112 @@
+{
+  "status": "measurement complete; restoration verified",
+  "date": "2026-10-31",
+  "phase_definitions": {
+    "A_common": "A: bond / sockets",
+    "B": "B: standalone / sockets",
+    "C": "C: standalone / zero-copy"
+  },
+  "system_CPU_rate_reduction_A_to_C_percent": 92.64882262770861,
+  "system_CPU_rate_reduction_B_to_C_percent": 92.41959800935831,
+  "phases": {
+    "A_common": {
+      "system_samples": 360,
+      "system_start": 1793464208.9480343,
+      "system_end": 1793467799.0125265,
+      "system_elapsed_seconds": 3590.064492225647,
+      "max_system_gap_seconds": 10.000256299972534,
+      "max_guard_gap_seconds": 10.184743404388428,
+      "guard_service_identity_unchanged": true,
+      "validator_cpu_core_equivalents": 28.003267264336696,
+      "validator_cpu_user_core_equivalents": 27.648187355671958,
+      "validator_cpu_system_core_equivalents": 0.35507990866473754,
+      "cpu": {
+        "cpu25": {
+          "busy_excluding_iowait_pct": 99.90780175427356,
+          "user_nice_pct": 99.30085318195366,
+          "system_pct": 0.19386700611962374,
+          "softirq_pct": 0.41308156620029024,
+          "iowait_pct": 0.09219824572643026
+        },
+        "cpu26": {
+          "busy_excluding_iowait_pct": 99.99415053188378,
+          "user_nice_pct": 99.58635904035297,
+          "system_pct": 0.020612411457158218,
+          "softirq_pct": 0.3871790800736476,
+          "iowait_pct": 0.005849468116220575
+        },
+        "cpu24": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.68830604502432,
+          "system_pct": 0.0,
+          "softirq_pct": 0.31169395497568286,
+          "iowait_pct": 0.0
+        },
+        "cpu31": {
+          "busy_excluding_iowait_pct": 99.99749307112714,
+          "user_nice_pct": 99.68579824793527,
+          "system_pct": 0.0,
+          "softirq_pct": 0.3116948231918775,
+          "iowait_pct": 0.002506928872856924
+        },
+        "cpu5": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.78774727998974,
+          "system_pct": 0.0,
+          "softirq_pct": 0.21225272001025053,
+          "iowait_pct": 0.0
+        },
+        "cpu6": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.69861311896426,
+          "system_pct": 0.0,
+          "softirq_pct": 0.30138688103574585,
+          "iowait_pct": 0.0
+        },
+        "cpu1": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 75.94510428736965,
+          "system_pct": 23.489727248417864,
+          "softirq_pct": 0.5651684642124967,
+          "iowait_pct": 0.0
+        },
+        "cpu2": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.66379391987877,
+          "system_pct": 0.0,
+          "softirq_pct": 0.3362060801212236,
+          "iowait_pct": 0.0
+        },
+        "cpu22": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.63594024629046,
+          "system_pct": 0.00027854610077240833,
+          "softirq_pct": 0.3637812076087653,
+          "iowait_pct": 0.0
+        },
+        "cpu4": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.68134237310797,
+          "system_pct": 0.0,
+          "softirq_pct": 0.31865762689202964,
+          "iowait_pct": 0.0
+        },
+        "cpu27": {
+          "busy_excluding_iowait_pct": 99.9994429062467,
+          "user_nice_pct": 99.76323515484421,
+          "system_pct": 0.0,
+          "softirq_pct": 0.2362077514024835,
+          "iowait_pct": 0.0005570937533077441
+        },
+        "cpu12": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.67075850888702,
+          "system_pct": 0.0,
+          "softirq_pct": 0.3292414911129867,
+          "iowait_pct": 0.0
+        },
+        "cpu19": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.71476958730725,
+          "system_pct": 0.00027854532489526694,
+          "softirq_pct": 0.2849518673678581,
+          "iowait_pct": 0.0
+        },
+        "cpu11": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.63677588459278,
+          "system_pct": 0.0,
+          "softirq_pct": 0.3632241154072205,
+          "iowait_pct": 0.0
+        },
+        "cpu8": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.57020336650817,
+          "system_pct": 0.00027854610077240833,
+          "softirq_pct": 0.4295180873910537,
+          "iowait_pct": 0.0
+        },
+        "cpu14": {
+          "busy_excluding_iowait_pct": 99.79833093781684,
+          "user_nice_pct": 99.44457443371104,
+          "system_pct": 0.004735323283306035,
+          "softirq_pct": 0.3490211808224978,
+          "iowait_pct": 0.20166906218315117
+        },
+        "cpu16": {
+          "busy_excluding_iowait_pct": 0.1864055312417906,
+          "user_nice_pct": 0.09641665409058135,
+          "system_pct": 0.08551738014990694,
+          "softirq_pct": 0.004471497001302323,
+          "iowait_pct": 0.10480071096802321
+        },
+        "cpu29": {
+          "busy_excluding_iowait_pct": 0.8236780889326295,
+          "user_nice_pct": 0.3019593808714324,
+          "system_pct": 0.41239822850496555,
+          "softirq_pct": 0.10932047955623155,
+          "iowait_pct": 0.04892860338194507
+        },
+        "cpu21": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.66379391987877,
+          "system_pct": 0.0,
+          "softirq_pct": 0.3362060801212236,
+          "iowait_pct": 0.0
+        },
+        "cpu17": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.78245549529674,
+          "system_pct": 0.0,
+          "softirq_pct": 0.2175445047032509,
+          "iowait_pct": 0.0
+        },
+        "cpu18": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.70529658361305,
+          "system_pct": 0.0,
+          "softirq_pct": 0.2947034163869584,
+          "iowait_pct": 0.0
+        },
+        "cpu30": {
+          "busy_excluding_iowait_pct": 0.7047104328935516,
+          "user_nice_pct": 0.27301603237150257,
+          "system_pct": 0.3834494836678407,
+          "softirq_pct": 0.04824491685420832,
+          "iowait_pct": 0.022867532844191227
+        },
+        "cpu3": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.71811056082628,
+          "system_pct": 0.0,
+          "softirq_pct": 0.28188943917371856,
+          "iowait_pct": 0.0
+        },
+        "cpu9": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.72618842024924,
+          "system_pct": 0.0005570937533077441,
+          "softirq_pct": 0.2732544859974485,
+          "iowait_pct": 0.0
+        },
+        "cpu": {
+          "busy_excluding_iowait_pct": 87.58104415902554,
+          "user_nice_pct": 86.4542955657415,
+          "system_pct": 0.77202950848993,
+          "softirq_pct": 0.35471908479410996,
+          "iowait_pct": 0.01880004183205232
+        },
+        "cpu15": {
+          "busy_excluding_iowait_pct": 99.99749307811011,
+          "user_nice_pct": 99.60418488827484,
+          "system_pct": 0.00027854687665387207,
+          "softirq_pct": 0.3930296429586135,
+          "iowait_pct": 0.0025069218898848486
+        },
+        "cpu7": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.68329220124454,
+          "system_pct": 0.0,
+          "softirq_pct": 0.3167077987554526,
+          "iowait_pct": 0.0
+        },
+        "cpu13": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.70585531758434,
+          "system_pct": 0.0,
+          "softirq_pct": 0.2941446824156632,
+          "iowait_pct": 0.0
+        },
+        "cpu28": {
+          "busy_excluding_iowait_pct": 99.99554326238764,
+          "user_nice_pct": 99.72953173615,
+          "system_pct": 0.00027854610077240833,
+          "softirq_pct": 0.2657329801368776,
+          "iowait_pct": 0.004456737612358533
+        },
+        "cpu10": {
+          "busy_excluding_iowait_pct": 99.99693598435681,
+          "user_nice_pct": 97.61786711085608,
+          "system_pct": 0.007520765669654546,
+          "softirq_pct": 2.371548107831067,
+          "iowait_pct": 0.0030640156431925927
+        },
+        "cpu23": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.7022342182743,
+          "system_pct": 0.019219680953296174,
+          "softirq_pct": 0.2785461007724083,
+          "iowait_pct": 0.0
+        },
+        "cpu0": {
+          "busy_excluding_iowait_pct": 0.17553421938982292,
+          "user_nice_pct": 0.0894441882241136,
+          "system_pct": 0.07938171704890082,
+          "softirq_pct": 0.006708314116808519,
+          "iowait_pct": 0.11264377454474306
+        },
+        "cpu20": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.65766588859239,
+          "system_pct": 0.0,
+          "softirq_pct": 0.3423341114076088,
+          "iowait_pct": 0.0
+        }
+      },
+      "ram": {
+        "available_GiB": {
+          "min": 36.2103157043457,
+          "median": 36.28164863586426,
+          "p95": 36.345619201660156,
+          "max": 36.355106353759766
+        },
+        "cgroup_current_GiB": {
+          "min": 95.71410369873047,
+          "median": 98.23552703857422,
+          "p95": 100.43636703491211,
+          "max": 100.61481475830078
+        },
+        "memory_events_start": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+        "memory_events_end": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+        "hugepages_start": {
+          "2048": {
+            "nr_hugepages": "2305\n",
+            "free_hugepages": "0\n",
+            "resv_hugepages": "0\n",
+            "surplus_hugepages": "0\n"
+          },
+          "1048576": {
+            "nr_hugepages": "79\n",
+            "free_hugepages": "1\n",
+            "resv_hugepages": "1\n",
+            "surplus_hugepages": "0\n"
+          }
+        },
+        "hugepages_end": {
+          "2048": {
+            "nr_hugepages": "2305\n",
+            "free_hugepages": "0\n",
+            "resv_hugepages": "0\n",
+            "surplus_hugepages": "0\n"
+          },
+          "1048576": {
+            "nr_hugepages": "79\n",
+            "free_hugepages": "1\n",
+            "resv_hugepages": "1\n",
+            "surplus_hugepages": "0\n"
+          }
+        },
+        "pressure_start": {
+          "cpu": "some avg10=0.00 avg60=0.00 avg300=0.00 total=1536036\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+          "memory": "some avg10=0.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n",
+          "io": "some avg10=0.00 avg60=0.00 avg300=0.00 total=1486473\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1468408\n"
+        },
+        "pressure_end": {
+          "cpu": "some avg10=0.00 avg60=0.00 avg300=0.00 total=2534470\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+          "memory": "some avg10=0.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n",
+          "io": "some avg10=0.00 avg60=0.00 avg300=0.00 total=1989329\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1877684\n"
+        }
+      },
+      "disk_nvme0n1": {
+        "read_MiB_s": 0.005321761988224238,
+        "write_MiB_s": 1.4240103690534696,
+        "read_IOPS": 0.6537487014738798,
+        "write_IOPS": 15.551252664374394,
+        "read_await_ms": 3.374094588836813,
+        "write_await_ms": 1.5409099050689594,
+        "avg_queue_depth": 0.026654674367890284,
+        "busy_time_pct": 0.7393460495620446
+      },
+      "replay": {
+        "samples": 359,
+        "caught_up_samples": 359,
+        "root_distance": {
+          "min": 0.0,
+          "median": 0.0,
+          "p95": 1.0,
+          "max": 1.0
+        },
+        "root_advance": 16501.0
+      },
+      "guard_interface_deltas": {
+        "rx_bytes": 27790438810,
+        "rx_packets": 78406200,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "tx_bytes": 30808165509,
+        "tx_packets": 87952352,
+        "tx_errors": 0
+      },
+      "host_context_switches_per_sec": 4298.651468077867,
+      "collection_seconds": {
+        "min": 0.0040223750002041925,
+        "median": 0.005460755999592948,
+        "p95": 0.0059729999998126004,
+        "max": 0.006528767999952834
+      },
+      "physical_NIC": {
+        "rx_MiB_s": 7.355714619936405,
+        "rx_pps": 21753.986639828665,
+        "rx_errors": 0,
+        "rx_drops": 0,
+        "tx_MiB_s": 8.153989547861473,
+        "tx_pps": 24401.264431239062,
+        "tx_errors": 0,
+        "tx_drops": 0
+      },
+      "completion": {
+        "start": 1793464203.1588147,
+        "end": 1793467808.7702055,
+        "elapsed": 3605.596911318
+      },
+      "public_vote_samples": 120,
+      "own_votes_advanced": true,
+      "disk_first300s_excluded": {
+        "read_MiB_s": 0.005602815706798742,
+        "write_MiB_s": 1.4100063342145759,
+        "read_IOPS": 0.6829664938871061,
+        "write_IOPS": 15.357779707666976,
+        "read_await_ms": 3.329327992879395,
+        "write_await_ms": 1.5395424319189361,
+        "avg_queue_depth": 0.02640621408808367,
+        "busy_time_pct": 0.7464304030654005
+      },
+      "sensitivity_system_seconds": 3290.0589122772217
+    },
+    "B": {
+      "system_samples": 91,
+      "system_start": 1793468009.016881,
+      "system_end": 1793468909.0323277,
+      "system_elapsed_seconds": 900.0154466629028,
+      "max_system_gap_seconds": 10.000224828720093,
+      "max_guard_gap_seconds": 10.1748788356781,
+      "guard_service_identity_unchanged": true,
+      "validator_cpu_core_equivalents": 28.005956618254274,
+      "validator_cpu_user_core_equivalents": 27.661614010414482,
+      "validator_cpu_system_core_equivalents": 0.3443426078397929,
+      "cpu": {
+        "cpu25": {
+          "busy_excluding_iowait_pct": 99.90777880245776,
+          "user_nice_pct": 99.36111820979767,
+          "system_pct": 0.18666459261563761,
+          "softirq_pct": 0.35999600004444393,
+          "iowait_pct": 0.09222119754224953
+        },
+        "cpu26": {
+          "busy_excluding_iowait_pct": 99.99555560493772,
+          "user_nice_pct": 99.7400028888568,
+          "system_pct": 0.019999777780246888,
+          "softirq_pct": 0.23555293830068555,
+          "iowait_pct": 0.004444395062277086
+        },
+        "cpu24": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.58445367880714,
+          "system_pct": 0.0,
+          "softirq_pct": 0.4155463211928624,
+          "iowait_pct": 0.0
+        },
+        "cpu31": {
+          "busy_excluding_iowait_pct": 99.9977778271594,
+          "user_nice_pct": 99.75556098753361,
+          "system_pct": 0.001111086420301771,
+          "softirq_pct": 0.24110575320548433,
+          "iowait_pct": 0.002222172840603542
+        },
+        "cpu5": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.78889123454184,
+          "system_pct": 0.0,
+          "softirq_pct": 0.21110876545816157,
+          "iowait_pct": 0.0
+        },
+        "cpu6": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.69333674070288,
+          "system_pct": 0.0,
+          "softirq_pct": 0.3066632592971189,
+          "iowait_pct": 0.0
+        },
+        "cpu1": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 76.13248741680648,
+          "system_pct": 23.22751969422562,
+          "softirq_pct": 0.6399928889679004,
+          "iowait_pct": 0.0
+        },
+        "cpu2": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.71667296282305,
+          "system_pct": 0.0,
+          "softirq_pct": 0.2833270371769516,
+          "iowait_pct": 0.0
+        },
+        "cpu22": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.70666992588971,
+          "system_pct": 0.018888679014677615,
+          "softirq_pct": 0.27444139509561005,
+          "iowait_pct": 0.0
+        },
+        "cpu4": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 100.0,
+          "system_pct": 0.0,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0
+        },
+        "cpu27": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.74556120975089,
+          "system_pct": 0.0,
+          "softirq_pct": 0.2544387902491056,
+          "iowait_pct": 0.0
+        },
+        "cpu12": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.67000366662593,
+          "system_pct": 0.0,
+          "softirq_pct": 0.32999633337407364,
+          "iowait_pct": 0.0
+        },
+        "cpu19": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.67778135798491,
+          "system_pct": 0.0,
+          "softirq_pct": 0.3222186420150887,
+          "iowait_pct": 0.0
+        },
+        "cpu11": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.69334355521482,
+          "system_pct": 0.0,
+          "softirq_pct": 0.30665644478517384,
+          "iowait_pct": 0.0
+        },
+        "cpu8": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.58222686414595,
+          "system_pct": 0.0,
+          "softirq_pct": 0.4177731358540461,
+          "iowait_pct": 0.0
+        },
+        "cpu14": {
+          "busy_excluding_iowait_pct": 99.79111575298327,
+          "user_nice_pct": 99.44667896268972,
+          "system_pct": 0.004444345681207084,
+          "softirq_pct": 0.33999244461234196,
+          "iowait_pct": 0.20888424701673297
+        },
+        "cpu16": {
+          "busy_excluding_iowait_pct": 0.1414033446901374,
+          "user_nice_pct": 0.07571202707818381,
+          "system_pct": 0.06123766896029572,
+          "softirq_pct": 0.004453648651657871,
+          "iowait_pct": 0.026721891909947223
+        },
+        "cpu29": {
+          "busy_excluding_iowait_pct": 0.32636124039701675,
+          "user_nice_pct": 0.08299220546178433,
+          "system_pct": 0.09645040094207369,
+          "softirq_pct": 0.14691863399315874,
+          "iowait_pct": 0.026916390960578702
+        },
+        "cpu21": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.65222608637681,
+          "system_pct": 0.0,
+          "softirq_pct": 0.34777391362318194,
+          "iowait_pct": 0.0
+        },
+        "cpu17": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.71667296282305,
+          "system_pct": 0.0,
+          "softirq_pct": 0.2833270371769516,
+          "iowait_pct": 0.0
+        },
+        "cpu18": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.7433361851535,
+          "system_pct": 0.0,
+          "softirq_pct": 0.2566638148465017,
+          "iowait_pct": 0.0
+        },
+        "cpu30": {
+          "busy_excluding_iowait_pct": 0.32184629876756415,
+          "user_nice_pct": 0.12111289291601718,
+          "system_pct": 0.09756316373790273,
+          "softirq_pct": 0.10317024211364427,
+          "iowait_pct": 0.05382795240711875
+        },
+        "cpu3": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.69000688873581,
+          "system_pct": 0.0,
+          "softirq_pct": 0.30999311126419415,
+          "iowait_pct": 0.0
+        },
+        "cpu9": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 97.67338503588809,
+          "system_pct": 0.0,
+          "softirq_pct": 2.3266149641119087,
+          "iowait_pct": 0.0
+        },
+        "cpu": {
+          "busy_excluding_iowait_pct": 87.58543668876409,
+          "user_nice_pct": 86.49090887610316,
+          "system_pct": 0.7436075809055472,
+          "softirq_pct": 0.3509202317553795,
+          "iowait_pct": 0.021925999231373845
+        },
+        "cpu15": {
+          "busy_excluding_iowait_pct": 99.99777785184938,
+          "user_nice_pct": 99.60779085141607,
+          "system_pct": 0.0011110740753086008,
+          "softirq_pct": 0.38887592635801027,
+          "iowait_pct": 0.0022221481506172016
+        },
+        "cpu7": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.68111465428161,
+          "system_pct": 0.0,
+          "softirq_pct": 0.3188853457183809,
+          "iowait_pct": 0.0
+        },
+        "cpu13": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.69445123441702,
+          "system_pct": 0.0,
+          "softirq_pct": 0.30554876558298705,
+          "iowait_pct": 0.0
+        },
+        "cpu28": {
+          "busy_excluding_iowait_pct": 99.9922223950579,
+          "user_nice_pct": 99.4989000244439,
+          "system_pct": 0.0,
+          "softirq_pct": 0.49332237061398637,
+          "iowait_pct": 0.007777604942112397
+        },
+        "cpu10": {
+          "busy_excluding_iowait_pct": 99.99888890123444,
+          "user_nice_pct": 99.61333762958189,
+          "system_pct": 0.005555493827846357,
+          "softirq_pct": 0.37999577782469085,
+          "iowait_pct": 0.0011110987655692714
+        },
+        "cpu23": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.73000299996667,
+          "system_pct": 0.0,
+          "softirq_pct": 0.269997000033333,
+          "iowait_pct": 0.0
+        },
+        "cpu0": {
+          "busy_excluding_iowait_pct": 0.14497763998706353,
+          "user_nice_pct": 0.07583445783938708,
+          "system_pct": 0.06022148122539562,
+          "softirq_pct": 0.008921700922280833,
+          "iowait_pct": 0.27545751597542073
+        },
+        "cpu20": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.66001133295556,
+          "system_pct": 0.0011110740753086008,
+          "softirq_pct": 0.33887759296912323,
+          "iowait_pct": 0.0
+        }
+      },
+      "ram": {
+        "available_GiB": {
+          "min": 36.359397888183594,
+          "median": 36.3930549621582,
+          "p95": 36.4268798828125,
+          "max": 36.4302978515625
+        },
+        "cgroup_current_GiB": {
+          "min": 94.54735565185547,
+          "median": 95.12575912475586,
+          "p95": 95.70024871826172,
+          "max": 95.73978805541992
+        },
+        "memory_events_start": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+        "memory_events_end": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+        "hugepages_start": {
+          "2048": {
+            "nr_hugepages": "2305\n",
+            "free_hugepages": "0\n",
+            "resv_hugepages": "0\n",
+            "surplus_hugepages": "0\n"
+          },
+          "1048576": {
+            "nr_hugepages": "79\n",
+            "free_hugepages": "1\n",
+            "resv_hugepages": "1\n",
+            "surplus_hugepages": "0\n"
+          }
+        },
+        "hugepages_end": {
+          "2048": {
+            "nr_hugepages": "2305\n",
+            "free_hugepages": "0\n",
+            "resv_hugepages": "0\n",
+            "surplus_hugepages": "0\n"
+          },
+          "1048576": {
+            "nr_hugepages": "79\n",
+            "free_hugepages": "1\n",
+            "resv_hugepages": "1\n",
+            "surplus_hugepages": "0\n"
+          }
+        },
+        "pressure_start": {
+          "cpu": "some avg10=0.00 avg60=0.06 avg300=0.05 total=3117139\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+          "memory": "some avg10=0.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n",
+          "io": "some avg10=0.00 avg60=0.03 avg300=0.02 total=2375143\nfull avg10=0.00 avg60=0.03 avg300=0.02 total=2249004\n"
+        },
+        "pressure_end": {
+          "cpu": "some avg10=0.00 avg60=0.00 avg300=0.00 total=3293791\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+          "memory": "some avg10=0.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n",
+          "io": "some avg10=0.00 avg60=0.00 avg300=0.00 total=2481887\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=2354133\n"
+        }
+      },
+      "disk_nvme0n1": {
+        "read_MiB_s": 0.0033636575474619377,
+        "write_MiB_s": 1.377237647249251,
+        "read_IOPS": 0.5511016525761638,
+        "write_IOPS": 15.039741873530149,
+        "read_await_ms": 4.008064516129032,
+        "write_await_ms": 1.6542553191489362,
+        "avg_queue_depth": 0.027560638089015613,
+        "busy_time_pct": 0.7270986319472613
+      },
+      "replay": {
+        "samples": 91,
+        "caught_up_samples": 91,
+        "root_distance": {
+          "min": 0.0,
+          "median": 0.0,
+          "p95": 1.0,
+          "max": 1.0
+        },
+        "root_advance": 4144.0
+      },
+      "guard_interface_deltas": {
+        "rx_bytes": 6876684968,
+        "rx_packets": 19603853,
+        "rx_dropped": 453,
+        "rx_errors": 0,
+        "tx_bytes": 7620068758,
+        "tx_packets": 22083948,
+        "tx_errors": 0
+      },
+      "host_context_switches_per_sec": 4189.66364853105,
+      "collection_seconds": {
+        "min": 0.0040140410001185955,
+        "median": 0.00534846199934691,
+        "p95": 0.005934501999945496,
+        "max": 0.006791372999941814
+      },
+      "physical_NIC": {
+        "rx_MiB_s": 7.245009546894888,
+        "rx_pps": 21648.822886589587,
+        "rx_errors": 0,
+        "rx_drops": 450,
+        "tx_MiB_s": 8.0254414017207,
+        "tx_pps": 24381.717093150077,
+        "tx_errors": 0,
+        "tx_drops": 0
+      },
+      "completion": {
+        "start": 1793468004.8385046,
+        "end": 1793468911.2533364,
+        "elapsed": 906.3978119900003
+      },
+      "public_vote_samples": 31,
+      "own_votes_advanced": true,
+      "disk_first300s_excluded": {
+        "read_MiB_s": 0.0029882309961667777,
+        "write_MiB_s": 1.4034073881278513,
+        "read_IOPS": 0.48832512104679227,
+        "write_IOPS": 14.726419008769478,
+        "read_await_ms": 4.023890784982935,
+        "write_await_ms": 1.6384110457220462,
+        "avg_queue_depth": 0.026576219727686517,
+        "busy_time_pct": 0.6994882365301663
+      },
+      "sensitivity_system_seconds": 600.0100903511047
+    },
+    "C": {
+      "system_samples": 361,
+      "system_start": 1793469009.0348017,
+      "system_end": 1793472609.0990086,
+      "system_elapsed_seconds": 3600.064206838608,
+      "max_system_gap_seconds": 10.000234842300415,
+      "max_guard_gap_seconds": 10.18114447593689,
+      "guard_service_identity_unchanged": true,
+      "validator_cpu_core_equivalents": 28.006570609622475,
+      "validator_cpu_user_core_equivalents": 27.98046805572316,
+      "validator_cpu_system_core_equivalents": 0.02610255389931515,
+      "cpu": {
+        "cpu25": {
+          "busy_excluding_iowait_pct": 99.91583567123135,
+          "user_nice_pct": 99.71417460626094,
+          "system_pct": 0.2016610649704175,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.08388655870670259
+        },
+        "cpu26": {
+          "busy_excluding_iowait_pct": 99.99333346296044,
+          "user_nice_pct": 98.36058743302213,
+          "system_pct": 0.018610749235431535,
+          "softirq_pct": 1.6141352807028753,
+          "iowait_pct": 0.006666537039557564
+        },
+        "cpu24": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 100.0,
+          "system_pct": 0.0,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0
+        },
+        "cpu31": {
+          "busy_excluding_iowait_pct": 99.99888890432078,
+          "user_nice_pct": 99.99611116512271,
+          "system_pct": 0.00027777391980666935,
+          "softirq_pct": 0.0024999652782600242,
+          "iowait_pct": 0.0011110956792266774
+        },
+        "cpu5": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 100.0,
+          "system_pct": 0.0,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0
+        },
+        "cpu6": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 100.0,
+          "system_pct": 0.0,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0
+        },
+        "cpu1": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.24640354215335,
+          "system_pct": 0.7530409130933565,
+          "softirq_pct": 0.0005555447532964637,
+          "iowait_pct": 0.0
+        },
+        "cpu2": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.99861113811676,
+          "system_pct": 0.00027777237664823183,
+          "softirq_pct": 0.0011110895065929273,
+          "iowait_pct": 0.0
+        },
+        "cpu22": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.98055598764472,
+          "system_pct": 0.019444012355280992,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0
+        },
+        "cpu4": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 100.0,
+          "system_pct": 0.0,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0
+        },
+        "cpu27": {
+          "busy_excluding_iowait_pct": 99.99888890740709,
+          "user_nice_pct": 99.99833336111065,
+          "system_pct": 0.0005555462964506147,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0011110925929012294
+        },
+        "cpu12": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 100.0,
+          "system_pct": 0.0,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0
+        },
+        "cpu19": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 100.0,
+          "system_pct": 0.0,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0
+        },
+        "cpu11": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.99861113425888,
+          "system_pct": 0.0013888657411265369,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0
+        },
+        "cpu8": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 100.0,
+          "system_pct": 0.0,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0
+        },
+        "cpu14": {
+          "busy_excluding_iowait_pct": 99.79278123142392,
+          "user_nice_pct": 99.79167013883102,
+          "system_pct": 0.0011110925929012294,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.2072187685760793
+        },
+        "cpu16": {
+          "busy_excluding_iowait_pct": 0.1650339236398593,
+          "user_nice_pct": 0.09474169690436368,
+          "system_pct": 0.06973655695893044,
+          "softirq_pct": 0.0005556697765651829,
+          "iowait_pct": 0.10613292732394992
+        },
+        "cpu29": {
+          "busy_excluding_iowait_pct": 0.22446374209116035,
+          "user_nice_pct": 0.10269216200670585,
+          "system_pct": 0.12121042072922658,
+          "softirq_pct": 0.0005611593552279008,
+          "iowait_pct": 0.07070607875871551
+        },
+        "cpu21": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 99.99944445370355,
+          "system_pct": 0.0005555462964506147,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0
+        },
+        "cpu17": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 100.0,
+          "system_pct": 0.0,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0
+        },
+        "cpu18": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 100.0,
+          "system_pct": 0.0,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0
+        },
+        "cpu30": {
+          "busy_excluding_iowait_pct": 0.16219466155846698,
+          "user_nice_pct": 0.06711503236902082,
+          "system_pct": 0.09452033725303766,
+          "softirq_pct": 0.0005592919364085068,
+          "iowait_pct": 0.041946895230638014
+        },
+        "cpu3": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 100.0,
+          "system_pct": 0.0,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0
+        },
+        "cpu9": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 100.0,
+          "system_pct": 0.0,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0
+        },
+        "cpu": {
+          "busy_excluding_iowait_pct": 87.56504180706872,
+          "user_nice_pct": 87.47129857094764,
+          "system_pct": 0.0423594702642946,
+          "softirq_pct": 0.05138376585679042,
+          "iowait_pct": 0.01989861520924727
+        },
+        "cpu15": {
+          "busy_excluding_iowait_pct": 99.99888890740709,
+          "user_nice_pct": 99.99888890740709,
+          "system_pct": 0.0,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0011110925929012294
+        },
+        "cpu7": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 100.0,
+          "system_pct": 0.0,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0
+        },
+        "cpu13": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 100.0,
+          "system_pct": 0.0,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0
+        },
+        "cpu28": {
+          "busy_excluding_iowait_pct": 99.99555564197362,
+          "user_nice_pct": 99.99527786959698,
+          "system_pct": 0.00027777237664823183,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.004444358026371709
+        },
+        "cpu10": {
+          "busy_excluding_iowait_pct": 99.99694450385687,
+          "user_nice_pct": 99.99027796681732,
+          "system_pct": 0.006666537039557564,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0030554961431305504
+        },
+        "cpu23": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 100.0,
+          "system_pct": 0.0,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0
+        },
+        "cpu0": {
+          "busy_excluding_iowait_pct": 0.17703450502711188,
+          "user_nice_pct": 0.08684711567367753,
+          "system_pct": 0.0670838297351163,
+          "softirq_pct": 0.02310355961831806,
+          "iowait_pct": 0.10995067529199559
+        },
+        "cpu20": {
+          "busy_excluding_iowait_pct": 100.0,
+          "user_nice_pct": 100.0,
+          "system_pct": 0.0,
+          "softirq_pct": 0.0,
+          "iowait_pct": 0.0
+        }
+      },
+      "ram": {
+        "available_GiB": {
+          "min": 36.036598205566406,
+          "median": 36.24268341064453,
+          "p95": 36.296260833740234,
+          "max": 36.30818557739258
+        },
+        "cgroup_current_GiB": {
+          "min": 95.31644821166992,
+          "median": 97.73688507080078,
+          "p95": 99.98345947265625,
+          "max": 100.23454666137695
+        },
+        "memory_events_start": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+        "memory_events_end": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+        "hugepages_start": {
+          "2048": {
+            "nr_hugepages": "2305\n",
+            "free_hugepages": "83\n",
+            "resv_hugepages": "83\n",
+            "surplus_hugepages": "0\n"
+          },
+          "1048576": {
+            "nr_hugepages": "79\n",
+            "free_hugepages": "0\n",
+            "resv_hugepages": "0\n",
+            "surplus_hugepages": "0\n"
+          }
+        },
+        "hugepages_end": {
+          "2048": {
+            "nr_hugepages": "2305\n",
+            "free_hugepages": "83\n",
+            "resv_hugepages": "83\n",
+            "surplus_hugepages": "0\n"
+          },
+          "1048576": {
+            "nr_hugepages": "79\n",
+            "free_hugepages": "0\n",
+            "resv_hugepages": "0\n",
+            "surplus_hugepages": "0\n"
+          }
+        },
+        "pressure_start": {
+          "cpu": "some avg10=0.03 avg60=0.14 avg300=0.05 total=3729693\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+          "memory": "some avg10=0.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n",
+          "io": "some avg10=0.03 avg60=0.13 avg300=0.04 total=2838818\nfull avg10=0.03 avg60=0.13 avg300=0.04 total=2694223\n"
+        },
+        "pressure_end": {
+          "cpu": "some avg10=0.00 avg60=0.00 avg300=0.00 total=5829505\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+          "memory": "some avg10=0.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n",
+          "io": "some avg10=0.00 avg60=0.00 avg300=0.00 total=3311380\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=3100835\n"
+        }
+      },
+      "disk_nvme0n1": {
+        "read_MiB_s": 0.004175272755260017,
+        "write_MiB_s": 2.027075391777076,
+        "read_IOPS": 0.6474884518926303,
+        "write_IOPS": 31.314997045288532,
+        "read_await_ms": 3.4182754182754183,
+        "write_await_ms": 15.988610559182515,
+        "avg_queue_depth": 0.5033965773603338,
+        "busy_time_pct": 0.7305703034417876
+      },
+      "replay": {
+        "samples": 359,
+        "caught_up_samples": 359,
+        "root_distance": {
+          "min": 0.0,
+          "median": 0.0,
+          "p95": 1.0,
+          "max": 1.0
+        },
+        "root_advance": 16496.0
+      },
+      "guard_interface_deltas": {
+        "rx_bytes": 27768559096,
+        "rx_packets": 78190303,
+        "rx_dropped": 1802,
+        "rx_errors": 0,
+        "tx_bytes": 30747279675,
+        "tx_packets": 88259927,
+        "tx_errors": 0
+      },
+      "host_context_switches_per_sec": 5844.586315997133,
+      "collection_seconds": {
+        "min": 0.003882493998389691,
+        "median": 0.0045572609997179825,
+        "p95": 0.005718747000173607,
+        "max": 0.006662330999461119
+      },
+      "physical_NIC": {
+        "rx_MiB_s": 7.3470646056506705,
+        "rx_pps": 21690.4587011719,
+        "rx_errors": 0,
+        "rx_drops": 1800,
+        "tx_MiB_s": 8.135085362401714,
+        "tx_pps": 24484.191929844532,
+        "tx_errors": 0,
+        "tx_drops": 0
+      },
+      "completion": {
+        "start": 1793469007.1285813,
+        "end": 1793472612.156588,
+        "elapsed": 3605.0110140879997
+      },
+      "public_vote_samples": 120,
+      "own_votes_advanced": true,
+      "disk_first300s_excluded": {
+        "read_MiB_s": 0.0042956108221184576,
+        "write_MiB_s": 1.4233526642998846,
+        "read_IOPS": 0.6467969365239989,
+        "write_IOPS": 14.957483103046293,
+        "read_await_ms": 3.6085526315789473,
+        "write_await_ms": 1.4971652679279024,
+        "avg_queue_depth": 0.025230551551154674,
+        "busy_time_pct": 0.7474638281484108
+      },
+      "sensitivity_system_seconds": 3290.058872938156
+    }
+  },
+  "limits": [
+    "Sequential ordinary traffic; no capacity or latency benchmark",
+    "Cgroup io.stat unavailable",
+    "Full-window leadership result unavailable",
+    "DoubleZero and mainnet untested",
+    "Mellanox parity unmeasured"
+  ]
+}

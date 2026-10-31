@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "status": "reviewed_experiment_package",
+  "scope": "Same-host backend swap on an already-working sole testnet voter with a prepared dedicated standalone X710 port",
+  "tested_configuration": {
+    "client": "Firedancer",
+    "version": "26.10.5",
+    "commit": "6286f99e400c1d5ac6f95b8cf36491555faa3726",
+    "binary_sha256": "e3db72439537f48b587e36782a6d0e1630833b22e1d976c0a7b83655f020bf46",
+    "os": "Ubuntu 26.04.1",
+    "kernel": "7.0.0-42-generic",
+    "driver": "i40e",
+    "nic": "Intel X710",
+    "pci_id": "8086:1572",
+    "pci_revision": "02",
+    "firmware": "NVM 6.01 / 0x800035cf / 1.1747.0",
+    "cpu": "AMD Ryzen 7950X",
+    "installed_ram_GB": 128,
+    "link_Gbps": 10,
+    "mtu": 1500,
+    "cluster": "testnet",
+    "consensus": "Alpenglow"
+  },
+  "applicability": "One observed configuration; other kernels, firmware, clients, clusters and hardware require separate validation. Not a general supported-platform matrix.",
+  "preconditions": [
+    "One active voting instance on this host; other replicas/start automation fenced or paused",
+    "Independent protected management and tested stop/recovery path",
+    "Working explicit socket configuration on same standalone port",
+    "Current consensus history and existing restart validation preserved",
+    "NIC queue/RSS/offloads already prepared, saved state and site rollback available",
+    "Hugepages/mounts/memlock/cgroup memory already provisioned for both backends",
+    "Trusted snapshot policy, sandbox, privilege drop and localhost RPC/metrics retained",
+    "The portable collector reads one selected service cgroup. Before measuring, confirm ALL validator tiles are in that cgroup. Tiles moved into another cgroup will be omitted and the CPU/resource totals will be incomplete. The measured X710 layout satisfied this prerequisite. Multi-cgroup layouts need a separately reviewed collector."
+  ],
+  "operations": [
+    {
+      "id": "inspect",
+      "kind": "read_only_host_inspection",
+      "examples": [
+        "version/hash verification",
+        "memory preview",
+        "configure check",
+        "ip link inspection",
+        "journal and voting status review"
+      ],
+      "effects": "No intended host configuration mutation; output can contain site metadata, so inspect before sharing."
+    },
+    {
+      "id": "collect",
+      "kind": "read_host_write_new_local_artifact",
+      "entrypoint": "scripts/collect_system.py",
+      "effects": "Reads systemd/procfs/sysfs/ethtool and writes a new private output directory; no service or network configuration changes. Not a watchdog."
+    },
+    {
+      "id": "summarize",
+      "kind": "read_local_data_emit_stdout",
+      "entrypoint": "scripts/summarize_system.py",
+      "effects": "Reads selected local capture; output redirection writes a local report."
+    },
+    {
+      "id": "make_candidate",
+      "kind": "write_local_candidate_only",
+      "entrypoint": "scripts/make_xdp_config.py",
+      "effects": "Reads STATE/socket.toml and writes or replaces STATE/xdp.toml; does not install it or change host networking/services. Review diff."
+    },
+    {
+      "id": "backend_swap",
+      "kind": "mutating_operator_steps",
+      "entrypoint": "docs/runbook.md",
+      "effects": [
+        "Stops voting service and interrupts voting until recovery",
+        "Temporarily sets two loopback sysctls",
+        "Replaces existing service TOML with reviewed candidate",
+        "Starts existing service; runtime attaches XDP"
+      ],
+      "automation": "No unattended apply script; runbook has explicit stop/review/verify decision points."
+    }
+  ],
+  "zero_copy_proof": {
+    "required": [
+      "Successful physical AF_XDP forced-zero-copy bind",
+      "Driver-mode XDP attachment on intended physical port",
+      "Expected selector and advancing RX/TX",
+      "Correct cluster/identity, catch-up and independently advancing own votes"
+    ],
+    "observed_physical_bind_flags": "0xc",
+    "flags_meaning": "XDP_ZEROCOPY plus XDP_USE_NEED_WAKEUP",
+    "non_proof": [
+      "Config flag alone",
+      "Service active alone",
+      "Generic loopback bind flags 8",
+      "Incoming-vote counters alone"
+    ],
+    "copy_vs_zero_copy": "A/B used ordinary socket backend; C used physical forced AF_XDP zero-copy. No equal-settings native-XDP copy arm was measured."
+  },
+  "rollback": {
+    "steps": [
+      "Stop service and verify empty cgroup",
+      "Restore original standalone/socket TOML",
+      "Restore both saved loopback sysctl values",
+      "Preserve newest history; never roll history back",
+      "Confirm experiment XDP attachments gone; investigate ownership if remaining",
+      "Run existing history restart check and restart",
+      "Verify own voting/catch-up/identity/endpoints/management before resuming automation"
+    ],
+    "does_not_restore": [
+      "Prior bond topology",
+      "NIC preparation performed before this recipe",
+      "Boot resource provisioning"
+    ],
+    "failure_rule": "Keep service stopped when prerequisite/ownership/history checks fail; use site recovery. Do not blindly detach another XDP program or start a stale replica."
+  },
+  "measured_results": {
+    "A_system_cpu_cores": 0.35507990866473754,
+    "B_system_cpu_cores": 0.3443426078397929,
+    "C_system_cpu_cores": 0.02610255389931515,
+    "A_to_C_reduction_percent": 92.64882262770861,
+    "B_to_C_reduction_percent": 92.41959800935831,
+    "total_validator_cpu_cores_approximately": 28,
+    "phase_minutes": {
+      "A_bond_socket": 60,
+      "B_standalone_socket": 15,
+      "C_standalone_zero_copy": 60
+    }
+  },
+  "limitations": [
+    "Sequential ordinary testnet workload, not randomized controlled capacity test",
+    "Topology/backend/queue differences and shorter B phase",
+    "Unexplained Linux RX drops in standalone phases",
+    "No full-window leader-production verification",
+    "No throughput maximum, latency-percentile, energy, losslessness, mainnet, long-term reliability or mlx5-parity result",
+    "Reconstructed build and host-changing operator recipe not clean-room replayed"
+  ],
+  "publication": {
+    "repository": null,
+    "commit": null,
+    "article": null,
+    "license": {
+      "code_and_config": "MIT",
+      "prose_data_figures": "CC-BY-4.0",
+      "map": "../LICENSE.md"
+    }
+  }
+}

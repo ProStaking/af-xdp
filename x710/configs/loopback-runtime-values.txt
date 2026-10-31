@@ -1,0 +1,6 @@
+REFERENCE VALUES ONLY; this is not an installable persistent sysctl file.
+Capture existing values before the maintenance window and restore them on rollback.
+Only loopback changes; do not apply these values to physical/management interfaces.
+
+net.ipv4.conf.lo.accept_local = 1
+net.ipv4.conf.lo.route_localnet = 1

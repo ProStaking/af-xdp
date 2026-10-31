@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 ProStaking contributors
+# Template: replace operator-specific values before use. Alpenglow TESTNET tuple only.
+user = "sol"
+name = "testnet-validator"
+telemetry = false
+[paths]
+base = "/var/lib/firedancer/testnet"
+identity_key = "/var/lib/firedancer/keys/identity.json"
+vote_account = "REPLACE_WITH_PUBLIC_VOTE_ACCOUNT"
+vote_history = "/var/lib/firedancer/testnet/vote-history"
+[accounts]
+max_accounts = 200000000
+cache_size_gib = 12
+[layout]
+affinity = "auto"
+enable_block_production = true
+enable_snapshot_production = false
+net_tile_count = 1
+execrp_tile_count = 4
+snapdc_tile_count = 1
+snapin_tile_count = 1
+shred_tile_count = 2
+[tiles.gui]
+enabled = false
+[tiles.rpc]
+enabled = true
+rpc_listen_address = "127.0.0.1"
+rpc_listen_port = 8899
+[net]
+provider = "xdp"
+interface = "ens1f0" # Replace with the verified standalone X710 port.
+bind_address = "192.0.2.10" # Documentation address: replace with actual public address.
+[hugetlbfs]
+mount_path = "/mnt/firedancer"
+[snapshots.server]
+enabled = false
+[tiles.metric]
+prometheus_listen_address = "127.0.0.1"
+[log]
+path = "/var/lib/firedancer/testnet/logs/firedancer.log"
+[development]
+sandbox = true
+core_dump = "disabled"
+[consensus]
+expected_genesis_hash = "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY"
+alpenglow = true
+[snapshots.sources]
+servers = []
+[snapshots.sources.gossip]
+allow_any = false
+allow_list = ["REPLACE_WITH_TRUSTED_SNAPSHOT_PROVIDER"]
+
+[net.xdp]
+xdp_mode = "drv"
+native_bond = "false"
+xdp_zero_copy = "true"
+poll_mode = "softirq"
+rss_queue_mode = "simple"
+
+# listen_gre is omitted: pinned default is the string "auto".
+# In rss_queue_mode="simple" this field is ignored; omission does not disable GRE.

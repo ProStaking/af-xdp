@@ -1,0 +1,38 @@
+# Sanitized measured excerpt of an inherited deployed unit.
+# Pre-session base-unit authorship not established; see ../../LICENSE.md.
+# Measured reference, with non-operational SITE placeholders. Not a drop-in installation.
+[Unit]
+Description=SITE validator (description label sanitized)
+Requires=site-validator-prepare.service
+Wants=network-online.target site-resource-guard.timer
+After=network-online.target site-validator-prepare.service
+StartLimitIntervalSec=600
+StartLimitBurst=3
+ConditionPathExists=!/SITE/experiment/hold
+ConditionPathExists=!/SITE/experiment/fenced
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/SITE/validator
+ExecStartPre=/SITE/libexec/resource-check
+ExecStart=/opt/firedancer/v26.10.5/bin/firedancer run --testnet --config /SITE/config/validator.toml
+Restart=no
+RestartSec=30
+TimeoutStopSec=60
+KillMode=control-group
+LimitMEMLOCK=96G
+LimitNOFILE=1024000
+LimitNICE=40
+LimitCORE=0
+TasksMax=128
+MemoryMax=104G
+MemorySwapMax=0
+CPUAffinity=1-15 17-31
+UMask=0077
+ProtectSystem=strict
+ReadWritePaths=/SITE/validator /SITE/hugetlbfs
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
