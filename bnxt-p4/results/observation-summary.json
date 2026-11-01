@@ -1,0 +1,9 @@
+{
+  "samples": 90,
+  "max_sampling_gap_seconds": 10.054605960845947,
+  "min_available_ram_gib": 405.31776428222656,
+  "min_disk_free_gib": 392.4730567932129,
+  "all_samples_no_kernel_fault": true,
+  "all_samples_source_fenced": true,
+  "all_samples_management_ok": true
+}

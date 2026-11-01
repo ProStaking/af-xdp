@@ -1,0 +1,1569 @@
+--- a/bnxt.c
++++ b/bnxt.c
+@@ -1432,13 +1432,14 @@
+ 
+ #ifdef HAVE_XSK_SUPPORT
+ 	if (BNXT_RING_RX_ZC_MODE(rxr) && rxr->xsk_pool) {
+-		u32 headroom;
+-
+-		headroom = xsk_pool_get_headroom(rxr->xsk_pool);
++		u32 dma_len = le32_to_cpu(rxbd->rx_bd_len_flags_type) >> RX_BD_LEN_SHIFT;
++		int rc = bnxt_xsk_validate_pool(bp, rxr->xsk_pool, dma_len);
++
++		if (rc)
++			return rc;
+ 		rx_buf->data = xsk_buff_alloc(rxr->xsk_pool);
+ 		if (!rx_buf->data)
+ 			return -ENOMEM;
+-		bp->rx_dma_offset = headroom;
+ 		mapping = xsk_buff_xdp_get_dma(rx_buf->data);
+ 	} else if (BNXT_RX_PAGE_MODE(bp)) {
+ #else
+@@ -5009,6 +5010,10 @@
+ 	int i, max_idx;
+ 	struct pci_dev *pdev = bp->pdev;
+ 
++#ifdef HAVE_XSK_SUPPORT
++	bnxt_xsk_reclaim_tx(bp, txr);
++#endif
++
+ 	max_idx = bp->tx_nr_pages * TX_DESC_CNT;
+ 	for (i = 0; i < max_idx;) {
+ 		struct bnxt_sw_tx_bd *tx_buf = &txr->tx_buf_ring[i];
+@@ -5633,10 +5638,10 @@
+ 			return rc;
+ 
+ #ifdef HAVE_XSK_SUPPORT
+-		rxr->xsk_pool = xsk_get_pool_from_qid(bp->dev, i);
++		rxr->xsk_pool = bp->af_xdp_zc_qs && test_bit(i, bp->af_xdp_zc_qs) ?
++			xsk_get_pool_from_qid(bp->dev, i) : NULL;
+ 		if (BNXT_CHIP_P5_PLUS(bp) && test_bit(i, bp->af_xdp_zc_qs) &&
+-		    rxr->xsk_pool && bp->xdp_prog &&
+-		    xsk_buff_can_alloc(rxr->xsk_pool, bp->rx_ring_size)) {
++		    rxr->xsk_pool && bp->xdp_prog) {
+ 			rc = xdp_rxq_info_reg_mem_model(&rxr->xdp_rxq,
+ 							MEM_TYPE_XSK_BUFF_POOL, NULL);
+ 			rxr->flags |= BNXT_RING_FLAG_AF_XDP_ZC;
+@@ -7767,7 +7772,9 @@
+ 					bnapi2->flags |= BNXT_NAPI_FLAG_XDP;
+ 					bnapi2->tx_int = bnxt_tx_int_xdp;
+ #ifdef HAVE_XSK_SUPPORT
+-					txr->xsk_pool = xsk_get_pool_from_qid(bp->dev, i);
++					txr->xsk_pool = bp->af_xdp_zc_qs &&
++						test_bit(i, bp->af_xdp_zc_qs) ?
++						xsk_get_pool_from_qid(bp->dev, i) : NULL;
+ #endif
+ 					j++;
+ 				} else {
+@@ -10111,17 +10118,19 @@
+ 		bnxt_cancel_one_dim(&bp->rx_ring[i]);
+ }
+ 
+-int hwrm_ring_free_send_msg(struct bnxt *bp,
++static int bnxt_hwrm_ring_free_send_checked(struct bnxt *bp,
+ 			    struct bnxt_ring_struct *ring,
+-			    u32 ring_type, int cmpl_ring_id)
++			    u32 ring_type, int cmpl_ring_id, bool strict)
+ {
+ 	struct hwrm_ring_free_output *resp;
+ 	struct hwrm_ring_free_input *req;
+ 	u16 error_code = 0;
+ 	int rc;
+ 
++	if (strict && cmpl_ring_id == INVALID_HW_RING_ID)
++		return -EINVAL;
+ 	if (BNXT_NO_FW_ACCESS(bp))
+-		return 0;
++		return strict ? -ENODEV : 0;
+ 
+ 	rc = hwrm_req_init(bp, req, HWRM_RING_FREE);
+ 	if (rc)
+@@ -10140,8 +10149,66 @@
+ 	if (rc || error_code) {
+ 		netdev_err(bp->dev, "hwrm_ring_free type %d failed. rc:%x err:%x\n",
+ 			   ring_type, rc, error_code);
+-		return -EIO;
+-	}
++		return strict && rc ? rc : -EIO;
++	}
++	return 0;
++}
++
++int hwrm_ring_free_send_msg(struct bnxt *bp,
++			    struct bnxt_ring_struct *ring,
++			    u32 ring_type, int cmpl_ring_id)
++{
++	return bnxt_hwrm_ring_free_send_checked(bp, ring, ring_type,
++					       cmpl_ring_id, false);
++}
++
++/* Experimental checked primitives, not wired into XSK detach yet.
++ * Caller must stop new producers and keep the completion NAPI running until
++ * this call returns, then synchronize NAPI and reclaim software ownership.
++ * Success establishes this ring's completion only, never all UMEM users.
++ * Unknown/already-invalid rings are not accepted as a fresh DMA proof.
++ */
++int bnxt_hwrm_xsk_rx_quiesce(struct bnxt *bp, struct bnxt_rx_ring_info *rxr)
++{
++	struct bnxt_ring_struct *ring = &rxr->rx_ring_struct;
++	u32 grp_idx = rxr->bnapi->index;
++	u32 cmpl_ring_id;
++	int rc;
++
++	if (BNXT_NO_FW_ACCESS(bp))
++		return -ENODEV;
++	if (ring->fw_ring_id == INVALID_HW_RING_ID)
++		return -EINVAL;
++	cmpl_ring_id = bnxt_cp_ring_for_rx(bp, rxr);
++	if (cmpl_ring_id == INVALID_HW_RING_ID)
++		return -EINVAL;
++	rc = bnxt_hwrm_ring_free_send_checked(bp, ring, RING_FREE_REQ_RING_TYPE_RX,
++				     cmpl_ring_id, true);
++	if (rc)
++		return rc;
++	ring->fw_ring_id = INVALID_HW_RING_ID;
++	bp->grp_info[grp_idx].rx_fw_ring_id = INVALID_HW_RING_ID;
++	return 0;
++}
++
++int bnxt_hwrm_xsk_tx_quiesce(struct bnxt *bp, struct bnxt_tx_ring_info *txr)
++{
++	struct bnxt_ring_struct *ring = &txr->tx_ring_struct;
++	u32 cmpl_ring_id;
++	int rc;
++
++	if (BNXT_NO_FW_ACCESS(bp))
++		return -ENODEV;
++	if (ring->fw_ring_id == INVALID_HW_RING_ID)
++		return -EINVAL;
++	cmpl_ring_id = bnxt_cp_ring_for_tx(bp, txr);
++	if (cmpl_ring_id == INVALID_HW_RING_ID)
++		return -EINVAL;
++	rc = bnxt_hwrm_ring_free_send_checked(bp, ring, RING_FREE_REQ_RING_TYPE_TX,
++				     cmpl_ring_id, true);
++	if (rc)
++		return rc;
++	ring->fw_ring_id = INVALID_HW_RING_ID;
+ 	return 0;
+ }
+ 
+@@ -23822,7 +23889,9 @@
+ 
+ #ifdef HAVE_XDP_SET_REDIR_TARGET
+ 	dev->xdp_features = NETDEV_XDP_ACT_BASIC | NETDEV_XDP_ACT_REDIRECT |
+-			    NETDEV_XDP_ACT_RX_SG | NETDEV_XDP_ACT_XSK_ZEROCOPY;
++			    NETDEV_XDP_ACT_RX_SG;
++	if (BNXT_CHIP_P5_PLUS(bp))
++		dev->xdp_features |= NETDEV_XDP_ACT_XSK_ZEROCOPY;
+ #endif
+ 
+ #ifdef CONFIG_BNXT_SRIOV
+--- a/bnxt.h
++++ b/bnxt.h
+@@ -3892,6 +3892,8 @@
+ int bnxt_hwrm_tx_ring_alloc(struct bnxt *bp, struct bnxt_tx_ring_info *txr,
+ 			    u32 tx_idx);
+ int bnxt_hwrm_rx_ring_alloc(struct bnxt *bp, struct bnxt_rx_ring_info *rxr);
++int bnxt_hwrm_xsk_rx_quiesce(struct bnxt *bp, struct bnxt_rx_ring_info *rxr);
++int bnxt_hwrm_xsk_tx_quiesce(struct bnxt *bp, struct bnxt_tx_ring_info *txr);
+ void bnxt_hwrm_tx_ring_free(struct bnxt *bp, struct bnxt_tx_ring_info *txr,
+ 			    bool close_path);
+ void bnxt_hwrm_rx_ring_free(struct bnxt *bp, struct bnxt_rx_ring_info *rxr,
+--- a/bnxt_xdp.c
++++ b/bnxt_xdp.c
+@@ -212,14 +212,15 @@
+ 			}
+ 			txr->xdp_tx_pending--;
+ 		} else if (tx_buf->action == BNXT_XSK_TX) {
+-			rx_doorbell_needed = false;
++			tx_buf->action = 0;
+ 			xsk_tx++;
+ 		} else {
+ 			bnxt_sched_reset_txr(bp, txr, tx_cons);
+-			return;
++			goto complete_prefix;
+ 		}
+ 		tx_cons = NEXT_TX(tx_cons);
+ 	}
++complete_prefix:
+ 	WRITE_ONCE(txr->tx_cons, tx_cons);
+ 
+ #ifdef HAVE_XSK_SUPPORT
+--- a/bnxt_xsk.c
++++ b/bnxt_xsk.c
+@@ -61,81 +61,6 @@
+ 	return 0;
+ }
+ 
+-static void bnxt_xsk_disable_rx_ring(struct bnxt *bp, u16 queue_id)
+-{
+-	struct bnxt_rx_ring_info *rxr;
+-	struct bnxt_vnic_info *vnic;
+-	struct bnxt_napi *bnapi;
+-
+-	rxr = &bp->rx_ring[queue_id];
+-	bnapi = rxr->bnapi;
+-	vnic = &bp->vnic_info[BNXT_VNIC_NTUPLE];
+-
+-#ifdef HAVE_XDP_RXQ_INFO
+-	if (xdp_rxq_info_is_reg(&rxr->xdp_rxq))
+-		xdp_rxq_info_unreg(&rxr->xdp_rxq);
+-#endif
+-	vnic->mru = 0;
+-	bnxt_hwrm_vnic_update(bp, vnic, VNIC_UPDATE_REQ_ENABLES_MRU_VALID);
+-	napi_disable_locked(&bnapi->napi);
+-	bnxt_free_one_rx_ring(bp, rxr);
+-	bnxt_hwrm_rx_ring_free(bp, rxr, 0);
+-}
+-
+-static int bnxt_xsk_enable_rx_ring(struct bnxt *bp,  u16 queue_id)
+-{
+-	struct bnxt_rx_ring_info *rxr;
+-	struct bnxt_vnic_info *vnic;
+-	struct bnxt_napi *bnapi;
+-	int rc, i;
+-	u32 prod;
+-
+-	rxr = &bp->rx_ring[queue_id];
+-	bnapi = rxr->bnapi;
+-	vnic = &bp->vnic_info[BNXT_VNIC_NTUPLE];
+-
+-#ifdef HAVE_XDP_RXQ_INFO
+-	rc = xdp_rxq_info_reg(&rxr->xdp_rxq, bp->dev, queue_id, 0);
+-	if (rc < 0)
+-		return rc;
+-
+-	rxr->xsk_pool = xsk_get_pool_from_qid(bp->dev, queue_id);
+-	if (BNXT_RING_RX_ZC_MODE(rxr) && rxr->xsk_pool) {
+-		rc = xdp_rxq_info_reg_mem_model(&rxr->xdp_rxq,
+-						MEM_TYPE_XSK_BUFF_POOL, NULL);
+-		xsk_pool_set_rxq_info(rxr->xsk_pool, &rxr->xdp_rxq);
+-		netdev_dbg(bp->dev, "%s(): AF_XDP_ZC flag set for rxring:%d\n", __func__, queue_id);
+-	} else {
+-		rc = xdp_rxq_info_reg_mem_model(&rxr->xdp_rxq,
+-						MEM_TYPE_PAGE_POOL, rxr->page_pool);
+-		netdev_dbg(bp->dev, "%s(): AF_XDP_ZC flag RESET for rxring:%d\n",
+-			   __func__, queue_id);
+-	}
+-#endif
+-	rxr->rx_next_cons = 0;
+-	bnxt_hwrm_rx_ring_alloc(bp, rxr);
+-
+-	rxr->rx_prod = 0;
+-	prod = rxr->rx_prod;
+-	for (i = 0; i < bp->rx_ring_size; i++) {
+-		if (bnxt_alloc_rx_data(bp, rxr, prod, GFP_KERNEL)) {
+-			netdev_warn(bp->dev, "init'ed rx ring %d with %d/%d skbs only\n",
+-				    queue_id, i, bp->rx_ring_size);
+-			break;
+-		}
+-		prod = NEXT_RX(prod);
+-	}
+-	rxr->rx_prod = prod;
+-	netdev_dbg(bp->dev, "%s: XDP db_key 0x%llX, rx_prod 0x%x, queue_id %d\n",
+-		   __func__, rxr->rx_db.db_key64, rxr->rx_prod, queue_id);
+-	bnxt_db_write(bp, &rxr->rx_db, rxr->rx_prod);
+-	napi_enable_locked(&bnapi->napi);
+-	vnic->mru = bp->dev->mtu + VLAN_ETH_HLEN;
+-	bnxt_hwrm_vnic_update(bp, vnic, VNIC_UPDATE_REQ_ENABLES_MRU_VALID);
+-
+-	return rc;
+-}
+-
+ static bool bnxt_check_xsk_q_in_dflt_vnic(struct bnxt *bp, u16 queue_id)
+ {
+ 	u16 tbl_size, i;
+@@ -174,101 +99,156 @@
+ 	return 0;
+ }
+ 
++/* Conservative single-buffer prototype: keep mixed queues on one offset.
++ * Recheck at every RX allocation so an MTU/config change cannot post a larger
++ * DMA span into a smaller pool. This is not a complete reset/MTU transaction.
++ */
++int bnxt_xsk_validate_pool(struct bnxt *bp, struct xsk_buff_pool *pool,
++			   u32 dma_len)
++{
++	u32 chunk = xsk_pool_get_chunk_size(pool);
++	u32 headroom = xsk_pool_get_headroom(pool);
++
++	if (bp->flags & BNXT_FLAG_AGG_RINGS)
++		return -EOPNOTSUPP;
++	if (headroom >= chunk || !dma_len ||
++	    dma_len > chunk - headroom)
++		return -EINVAL;
++	if (headroom != bp->rx_dma_offset)
++		return -EOPNOTSUPP;
++	return 0;
++}
++
++/* Normal-lifecycle research candidate: recycle the complete NIC, as the
++ * existing XDP-program transition does. This deliberately interrupts every
++ * queue; it is not a per-queue hot-swap implementation. The device lock is
++ * held by ndo_bpf. Existing close/open firmware-failure semantics are retained;
++ * this does NOT make exceptional recovery safe or authorize loading.
++ */
+ static int bnxt_xdp_enable_pool(struct bnxt *bp, struct xsk_buff_pool *pool,
+-				u16 queue_id)
+-{
+-	struct bpf_prog *xdp_prog = READ_ONCE(bp->xdp_prog);
+-	struct device *dev = &bp->pdev->dev;
+-	struct bnxt_rx_ring_info *rxr;
+-	bool needs_reset;
++                                u16 queue_id)
++{
+ 	int rc;
+ 
++	if (!netif_running(bp->dev) || !READ_ONCE(bp->xdp_prog) ||
++	    !test_bit(BNXT_STATE_OPEN, &bp->state))
++		return -ENETDOWN;
++	if (test_bit(BNXT_STATE_IN_FW_RESET, &bp->state) ||
++	    test_bit(BNXT_STATE_ABORT_ERR, &bp->state))
++		return -EBUSY;
++	if (!(bp->flags & BNXT_FLAG_SHARED_RINGS) ||
++	    queue_id >= BNXT_TX_XDP_RDIR_RING_BASE(bp) ||
++	    !bp->rx_ring || !bp->tx_ring || !bp->bnapi)
++		return -EOPNOTSUPP;
++	/* First normal-path candidate supports one prefilled pool only.
++	 * Other pools can be depleted during the device-wide restart.
++	 */
++	if (!bitmap_empty(bp->af_xdp_zc_qs, BNXT_MAX_XSK_RINGS))
++		return -EBUSY;
++	if (!xsk_buff_can_alloc(pool, bp->rx_ring_size))
++		return -ENOBUFS;
+ 	rc = bnxt_validate_xsk(bp, queue_id);
+ 	if (rc)
+ 		return rc;
+-
+-	rxr = &bp->rx_ring[queue_id];
+-	rc = xsk_pool_dma_map(pool, dev, DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_WEAK_ORDERING);
++	rc = bnxt_xsk_validate_pool(bp, pool, bp->rx_buf_use_size);
++	if (rc)
++		return rc;
++	rc = xsk_pool_dma_map(pool, &bp->pdev->dev,
++			      DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_WEAK_ORDERING);
++	if (rc)
++		return rc;
++
++	/* Keep old RX and BOTH TX paths intact until normal close reclaims
++	 * them. The new mapping is not published to rings until reopening.
++	 */
++	bnxt_close_nic(bp, true, false);
++	set_bit(queue_id, bp->af_xdp_zc_qs);
++	rc = bnxt_open_nic(bp, true, false);
++	if (!rc && (queue_id >= bp->rx_nr_rings ||
++	    queue_id >= BNXT_TX_XDP_RDIR_RING_BASE(bp) ||
++	    !bp->rx_ring || !bp->tx_ring ||
++	    bp->rx_ring[queue_id].xsk_pool != pool ||
++	    bp->tx_ring[queue_id].xsk_pool != pool ||
++	    !BNXT_RING_RX_ZC_MODE(&bp->rx_ring[queue_id]) ||
++	    bp->rx_ring[queue_id].rx_prod != bp->rx_ring_size)) {
++		/* Initial fill can fail despite preflight (allocation/race).
++		 * Close while bitmap and mapping still identify the pool.
++		 */
++		bnxt_close_nic(bp, true, false);
++		netif_close(bp->dev);
++		rc = -ENOBUFS;
++	}
+ 	if (rc) {
+-		netdev_err(bp->dev, "Failed to map xsk pool\n");
+-		return rc;
+-	}
+-
+-	set_bit(queue_id, bp->af_xdp_zc_qs);
+-	/* Check if XDP program is already attached, in which case
+-	 * need to explicitly quiesce traffic, free the regular path
+-	 * resources and reallocate AF_XDP resources for the rings.
+-	 * Otherwise, in the normal case, resources for AF_XDP will
+-	 * get created anyway as part of the XDP program attach
+-	 */
+-	needs_reset = netif_running(bp->dev) && xdp_prog;
+-
+-	if (needs_reset) {
+-		/* Check to differentiate b/n Tx/Rx only modes */
+-		if (xsk_buff_can_alloc(pool, bp->rx_ring_size)) {
+-			bnxt_xsk_disable_rx_ring(bp, queue_id);
+-			rxr->flags |= BNXT_RING_FLAG_AF_XDP_ZC;
+-			bnxt_xsk_enable_rx_ring(bp, queue_id);
+-		} else {
+-			struct bnxt_tx_ring_info *txr = &bp->tx_ring[queue_id];
+-			struct bnxt_napi *bnapi;
+-
+-			bnapi = bp->bnapi[queue_id];
+-			bnxt_lock_napi(bnapi);
+-			txr->xsk_pool = xsk_get_pool_from_qid(bp->dev, queue_id);
+-			bnxt_unlock_napi(bnapi);
+-		}
+-	}
+-
++		/* Ordinary allocation/open failure has already freed partial
++		 * rings through open's unwind and netif_close. Leave NIC down;
++		 * do not mask the original error or retry a second open here.
++		 */
++		clear_bit(queue_id, bp->af_xdp_zc_qs);
++		xsk_pool_dma_unmap(pool,
++			DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_WEAK_ORDERING);
++	}
+ 	return rc;
+ }
+ 
+ static int bnxt_xdp_disable_pool(struct bnxt *bp, u16 queue_id)
+ {
+-	struct bpf_prog *xdp_prog = READ_ONCE(bp->xdp_prog);
+-	struct bnxt_rx_ring_info *rxr;
+-	struct bnxt_tx_ring_info *txr;
+-	struct xsk_buff_pool *pool;
+-	struct bnxt_napi *bnapi;
+-	bool needs_reset;
+-
+-	pool = xsk_get_pool_from_qid(bp->dev, queue_id);
+-	if (!pool)
++	struct xsk_buff_pool *pool = xsk_get_pool_from_qid(bp->dev, queue_id);
++	bool reopen;
++
++	if (!pool || !test_bit(queue_id, bp->af_xdp_zc_qs))
+ 		return -EINVAL;
+-
+-	if (!bp->bnapi ||
+-	    test_bit(BNXT_STATE_NAPI_DISABLED, &bp->state)) {
+-		xsk_pool_dma_unmap(pool, DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_WEAK_ORDERING);
+-		return 0;
+-	}
+-
+-	rxr = &bp->rx_ring[queue_id];
+-	txr = &bp->tx_ring[queue_id];
+-
+-	bnapi = bp->bnapi[queue_id];
+-
+-	bnxt_lock_napi(bnapi);
++	/* Detach must work after an ordinary interface-down as well. Do not
++	 * reject it on a firmware state bit: core does not retain on error.
++	 * Exceptional reset/device-loss remains an explicit unqualified path.
++	 */
++	reopen = netif_running(bp->dev) &&
++		 test_bit(BNXT_STATE_OPEN, &bp->state);
++	if (reopen)
++		bnxt_close_nic(bp, true, false);
++	/* Normal close stops every TX/RX ring and reclaims TX before RX.
++	 * Never use FILL availability as evidence of mode or ownership.
++	 */
+ 	clear_bit(queue_id, bp->af_xdp_zc_qs);
+-	xsk_pool_dma_unmap(pool, DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_WEAK_ORDERING);
+-
+-	needs_reset = netif_running(bp->dev) && xdp_prog;
+-
+-	if (needs_reset) {
+-		if (xsk_buff_can_alloc(pool, bp->rx_ring_size)) {
+-			bnxt_xsk_disable_rx_ring(bp, queue_id);
+-			rxr->flags &= ~BNXT_RING_FLAG_AF_XDP_ZC;
+-			bnxt_xsk_enable_rx_ring(bp, queue_id);
+-		}
+-	}
+-	txr->xsk_pool = NULL;
+-
+-	bnxt_unlock_napi(bnapi);
+-	return 0;
++	xsk_pool_dma_unmap(pool,
++		DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_WEAK_ORDERING);
++	/* Core still registers this pool during the callback. Allocation
++	 * must consult the bitmap, not merely xsk_get_pool_from_qid().
++	 */
++	return reopen ? bnxt_open_nic(bp, true, false) : 0;
++}
++
++/* Called only after normal hardware close and NAPI synchronization, before
++ * RX-backed XDP_TX buffers are returned by RX cleanup. Redirect frames use
++ * the existing separate redirect-ring cleanup. Walk outstanding descriptors,
++ * not stale completed slots, and return raw-XSK completions once.
++ */
++void bnxt_xsk_reclaim_tx(struct bnxt *bp, struct bnxt_tx_ring_info *txr)
++{
++	u16 cons = txr->tx_cons;
++	u32 completed = 0;
++
++	if (!txr->xsk_pool || !txr->tx_buf_ring)
++		return;
++	while (cons != txr->tx_prod) {
++		struct bnxt_sw_tx_bd *buf = &txr->tx_buf_ring[RING_TX(bp, cons)];
++
++		if (buf->action == BNXT_XSK_TX) {
++			buf->action = 0;
++			completed++;
++		}
++		cons = NEXT_TX(cons);
++	}
++	if (completed)
++		xsk_tx_completed(txr->xsk_pool, completed);
+ }
+ 
+ int bnxt_xdp_setup_pool(struct bnxt *bp, struct xsk_buff_pool *pool,
+ 			u16 queue_id)
+ {
++	/* Pool bitmap and normal RX activation exist only on P5+. */
++	if (!BNXT_CHIP_P5_PLUS(bp) || !bp->af_xdp_zc_qs)
++		return -EOPNOTSUPP;
++
+ 	if (queue_id >= bp->rx_nr_rings)
+ 		return -EINVAL;
+ 
+@@ -412,6 +392,9 @@
+ 	int num_frags = 0;
+ 	u32 len, flags;
+ 
++	if (READ_ONCE(txr->dev_state) == BNXT_DEV_STATE_CLOSING)
++		return false;
++
+ 	cpr = &bnapi->cp_ring;
+ 	txq = netdev_get_tx_queue(bp->dev, txr->txq_index);
+ 
+@@ -471,6 +454,16 @@
+ 	return xsk_more;
+ }
+ #else
++void bnxt_xsk_reclaim_tx(struct bnxt *bp, struct bnxt_tx_ring_info *txr)
++{
++}
++
++int bnxt_xsk_validate_pool(struct bnxt *bp, struct xsk_buff_pool *pool,
++			   u32 dma_len)
++{
++	return -EOPNOTSUPP;
++}
++
+ bool bnxt_rx_xsk(struct bnxt *bp, struct bnxt_rx_ring_info *rxr, u16 cons,
+ 		 struct xdp_buff *xdp, u8 **data_ptr, unsigned int *len, u8 *event)
+ {
+@@ -479,13 +472,13 @@
+ 
+ int bnxt_xsk_wakeup(struct net_device *dev, u32 queue_id, u32 flags)
+ {
+-	return 0;
++	return -EOPNOTSUPP;
+ }
+ 
+ int bnxt_xdp_setup_pool(struct bnxt *bp, struct xsk_buff_pool *pool,
+ 			u16 queue_id)
+ {
+-	return 0;
++	return -EOPNOTSUPP;
+ }
+ 
+ bool bnxt_xsk_xmit(struct bnxt *bp, struct bnxt_napi *bnapi, int budget)
+--- a/bnxt_xsk.h
++++ b/bnxt_xsk.h
+@@ -14,6 +14,9 @@
+ #include <net/xdp_sock_drv.h>
+ #endif
+ 
++int bnxt_xsk_validate_pool(struct bnxt *bp, struct xsk_buff_pool *pool,
++			   u32 dma_len);
++void bnxt_xsk_reclaim_tx(struct bnxt *bp, struct bnxt_tx_ring_info *txr);
+ int bnxt_xsk_wakeup(struct net_device *dev, u32 queue_id, u32 flags);
+ int bnxt_xdp_setup_pool(struct bnxt *bp, struct xsk_buff_pool *pool,
+ 			u16 queue_id);
+--- /dev/null
++++ b/bnxt_xsk_lifecycle.h
+@@ -0,0 +1,105 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef BNXT_XSK_LIFECYCLE_H
++#define BNXT_XSK_LIFECYCLE_H
++#include <linux/errno.h>
++
++/* Disconnected prototype. Caller MUST hold lifecycle serialization before init/detach and
++ * through unmap. Plain state fields do not protect concurrent calls. The check
++ * callback verifies existing ownership; it does not acquire it. Callbacks need
++ * complete inventory (including both 239 TX rings per NAPI), stopped
++ * producers, live completion handling, and post-drain software ownership.
++ * This coordinator cannot prove those hardware/integration contracts itself.
++ * It can also order rollback after mapping but before publication. Failed
++ * transactions retain local mappings/progress; recovery is external. Linux
++ * pool release does not honor a failing detach return: this is NOT safe to
++ * connect to ndo_bpf without a separate pool/UMEM lifetime recovery contract.
++ */
++#define BNXT_XSK_LC_MAX_RINGS 64U
++#define BNXT_XSK_LC_RX 1U
++#define BNXT_XSK_LC_TX 2U
++#define BNXT_XSK_LC_MAPPED 1U
++#define BNXT_XSK_LC_BUSY 2U
++#define BNXT_XSK_LC_FAILED 3U
++#define BNXT_XSK_LC_UNMAPPED 4U
++struct bnxt_xsk_lc_ring { unsigned int kind, id; };
++struct bnxt_xsk_lc {
++ unsigned int state, count;
++ unsigned long long generation;
++ struct bnxt_xsk_lc_ring ring[BNXT_XSK_LC_MAX_RINGS];
++ unsigned char drained[BNXT_XSK_LC_MAX_RINGS];
++ unsigned char reclaimed[BNXT_XSK_LC_MAX_RINGS];
++ int error;
++};
++struct bnxt_xsk_lc_ops {
++ int (*check)(void *, const struct bnxt_xsk_lc *);
++ int (*fence)(void *);
++ int (*drain)(void *, const struct bnxt_xsk_lc_ring *);
++ int (*synchronize)(void *);
++ int (*reclaim)(void *, const struct bnxt_xsk_lc_ring *);
++ int (*owners_empty)(void *);
++ void (*unmap)(void *);
++};
++static inline int
++bnxt_xsk_lc_init(struct bnxt_xsk_lc *s, unsigned long long generation,
++                 const struct bnxt_xsk_lc_ring *rings, unsigned int count)
++{
++ unsigned int i, j;
++ if (!s || !rings || !count || count > BNXT_XSK_LC_MAX_RINGS)
++  return -EINVAL;
++ /* Caller owns fresh storage; never reinitialize an active transaction. */
++ if (s->state)
++  return -EALREADY;
++ for (i=0; i<count; i++) {
++  if (rings[i].kind != BNXT_XSK_LC_RX && rings[i].kind != BNXT_XSK_LC_TX)
++   return -EINVAL;
++  for (j=0; j<i; j++)
++   if (rings[j].kind==rings[i].kind && rings[j].id==rings[i].id)
++    return -EINVAL;
++ }
++ for (i=0; i<count; i++) {
++  s->ring[i]=rings[i]; s->drained[i]=0; s->reclaimed[i]=0;
++ }
++ s->count=count; s->generation=generation; s->error=0;
++ s->state=BNXT_XSK_LC_MAPPED;
++ return 0;
++}
++static inline int
++bnxt_xsk_lc_detach(struct bnxt_xsk_lc *s,
++                    const struct bnxt_xsk_lc_ops *ops, void *ctx)
++{
++ unsigned int i, kind;
++ int rc;
++ if (!s || !ops || !ops->check || !ops->fence || !ops->drain ||
++     !ops->synchronize || !ops->reclaim || !ops->owners_empty || !ops->unmap)
++  return -EINVAL;
++ if (s->state!=BNXT_XSK_LC_MAPPED)
++  return -EALREADY;
++ s->state=BNXT_XSK_LC_BUSY;
++ rc=ops->check(ctx,s); if (rc) goto fail;
++ rc=ops->fence(ctx); if (rc) goto fail;
++ for (i=0; i<s->count; i++) {
++  rc=ops->check(ctx,s); if (rc) goto fail;
++  rc=ops->drain(ctx,&s->ring[i]); if (rc) goto fail;
++  s->drained[i]=1;
++ }
++ rc=ops->check(ctx,s); if (rc) goto fail;
++ rc=ops->synchronize(ctx); if (rc) goto fail;
++ /* Release TX software references before their potentially RX-backed frames. */
++ for (kind=BNXT_XSK_LC_TX; kind>=BNXT_XSK_LC_RX; kind--)
++  for (i=0; i<s->count; i++) {
++   if (s->ring[i].kind!=kind) continue;
++   rc=ops->check(ctx,s); if (rc) goto fail;
++   rc=ops->reclaim(ctx,&s->ring[i]); if (rc) goto fail;
++   s->reclaimed[i]=1;
++  }
++ rc=ops->check(ctx,s); if (rc) goto fail;
++ rc=ops->owners_empty(ctx); if (rc) goto fail;
++ rc=ops->check(ctx,s); if (rc) goto fail;
++ s->state=BNXT_XSK_LC_UNMAPPED;
++ ops->unmap(ctx);
++ return 0;
++fail:
++ s->error=rc; s->state=BNXT_XSK_LC_FAILED;
++ return rc;
++}
++#endif
+--- /dev/null
++++ b/tests/test_generation_gate.py
+@@ -0,0 +1,104 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++# Compile the actual setup function and actual chip macros with mocked callees.
++# This tests dispatch rejection, not DMA/hardware or the rest of the driver.
++from pathlib import Path
++import re, subprocess, tempfile, sys
++root = Path(sys.argv[1]).resolve() if len(sys.argv)>1 else Path(__file__).resolve().parents[1]
++header = (root / "bnxt.h").read_text()
++source = (root / "bnxt_xsk.c").read_text()
++macros = []
++for name in ["CHIP_NUM_57416", "CHIP_NUM_57508", "CHIP_NUM_57504", "CHIP_NUM_57502", "CHIP_NUM_58818", "CHIP_NUM_57608", "CHIP_NUM_THOR3C", "CHIP_NUM_THOR3CP", "BNXT_CHIP_P8", "BNXT_CHIP_P7_PLUS", "BNXT_CHIP_P7", "BNXT_CHIP_P5", "BNXT_CHIP_P5_PLUS"]:
++    lines = header.splitlines()
++    for i, line in enumerate(lines):
++        if re.match(r"#define\s+" + name + r"(?:\s|\()", line):
++            part = [line]
++            while part[-1].endswith("\\"):
++                i += 1
++                part.append(lines[i])
++            macros.append("\n".join(part))
++            break
++    else:
++        raise RuntimeError("macro absent: " + name)
++start = source.index("int bnxt_xdp_setup_pool(")
++end = source.index("\n}\n", start) + 3
++function = source[start:end]
++net_source=(root / "bnxt.c").read_text()
++feature_start=net_source.index("\tdev->xdp_features = NETDEV_XDP_ACT_BASIC")
++feature_end=net_source.index("\n#endif",feature_start)
++features=net_source[feature_start:feature_end]
++program = r"""
++#include <assert.h>
++#include <errno.h>
++#include <stdint.h>
++typedef uint16_t u16;
++struct bnxt { unsigned chip_num; void *af_xdp_zc_qs; unsigned rx_nr_rings; };
++struct xsk_buff_pool { int unused; };
++static unsigned enabled, disabled;
++static int enable_result=19, disable_result=23;
++static int bnxt_xdp_enable_pool(struct bnxt *bp, struct xsk_buff_pool *pool, u16 q) {
++  (void)bp; (void)pool; (void)q; ++enabled; return enable_result;
++}
++static int bnxt_xdp_disable_pool(struct bnxt *bp, u16 q) {
++  (void)bp; (void)q; ++disabled; return disable_result;
++}
++""" + "\n".join(macros) + "\n" + function + r"""
++#define NETDEV_XDP_ACT_BASIC 1U
++#define NETDEV_XDP_ACT_REDIRECT 2U
++#define NETDEV_XDP_ACT_RX_SG 4U
++#define NETDEV_XDP_ACT_XSK_ZEROCOPY 8U
++struct net_device { unsigned xdp_features; };
++static unsigned advertised(struct bnxt *bp) {
++ (void)bp;
++ struct net_device storage={0}, *dev=&storage;
++""" + features + r"""
++ return dev->xdp_features;
++}
++
++int main(void) {
++  struct xsk_buff_pool pool = {0};
++  struct bnxt bp = { .chip_num=CHIP_NUM_57416, .af_xdp_zc_qs=0, .rx_nr_rings=4 };
++  assert(advertised(&bp)==7U);
++  assert(bnxt_xdp_setup_pool(&bp, &pool, 0)==-EOPNOTSUPP);
++  assert(bnxt_xdp_setup_pool(&bp, 0, 0)==-EOPNOTSUPP);
++  bp.af_xdp_zc_qs=&pool;
++  assert(bnxt_xdp_setup_pool(&bp, &pool, 0)==-EOPNOTSUPP);
++  bp.chip_num=0xffff;
++  assert(bnxt_xdp_setup_pool(&bp, &pool, 0)==-EOPNOTSUPP);
++  bp.chip_num=CHIP_NUM_57504; bp.af_xdp_zc_qs=0;
++  assert(bnxt_xdp_setup_pool(&bp, &pool, 0)==-EOPNOTSUPP);
++  assert(!enabled && !disabled);
++  bp.af_xdp_zc_qs=&pool;
++  assert(advertised(&bp)==15U);
++  assert(bnxt_xdp_setup_pool(&bp, &pool, 4)==-EINVAL);
++  assert(!enabled && !disabled);
++  assert(bnxt_xdp_setup_pool(&bp, &pool, 3)==19);
++  assert(enabled==1 && !disabled);
++  assert(bnxt_xdp_setup_pool(&bp, 0, 3)==23);
++  assert(enabled==1 && disabled==1);
++  bp.chip_num=CHIP_NUM_57608;
++  assert(bnxt_xdp_setup_pool(&bp, &pool, 0)==19);
++  assert(enabled==2 && disabled==1);
++  bp.rx_nr_rings=0;
++  assert(bnxt_xdp_setup_pool(&bp, &pool, 0)==-EINVAL);
++  assert(enabled==2 && disabled==1);
++  bp.rx_nr_rings=4;
++  enable_result=-ENOMEM; disable_result=-EBUSY;
++  assert(bnxt_xdp_setup_pool(&bp, &pool, 0)==-ENOMEM);
++  assert(bnxt_xdp_setup_pool(&bp, 0, 0)==-EBUSY);
++  assert(enabled==3 && disabled==2);
++  bp.chip_num=CHIP_NUM_THOR3C;
++  assert(advertised(&bp)==15U);
++  enable_result=19;
++  assert(bnxt_xdp_setup_pool(&bp, &pool, 0)==19);
++  assert(enabled==4 && disabled==2);
++  return 0;
++}
++"""
++with tempfile.TemporaryDirectory() as tmp:
++    c = Path(tmp) / "gate.c"
++    exe = Path(tmp) / "gate"
++    c.write_text(program)
++    subprocess.run(["gcc", "-std=c17", "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined", "-fno-omit-frame-pointer", str(c), "-o", str(exe)], check=True)
++    subprocess.run([str(exe)], check=True)
++print("generation gate: PASS (actual source function/macros, mocked callees)")
+--- /dev/null
++++ b/tests/test_kernel_release.py
+@@ -0,0 +1,72 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++# Execute unmodified upstream release control flow with mocked objects.
++from pathlib import Path
++import subprocess,tempfile
++root=Path(__file__).resolve().parents[2]/'kernel-reference'
++for version in ['6.1','6.8','current']:
++    source=((root.parent/'lifetime-research/current-xsk_buff_pool.c') if version=='current' else root/f'xsk_buff_pool-v{version}.c').read_text()
++    functions=[]
++    for name in (['xp_disable_drv_zc','__xp_clear_dev','xp_clear_dev','xp_release_deferred'] if version=='current' else ['xp_disable_drv_zc','xp_clear_dev','xp_release_deferred']):
++        start=source.index('void '+name+'(')
++        functions.append(source[start:source.index('\n}\n',start)+3])
++    code=r'''
++#include <assert.h>
++#include <errno.h>
++#include <stddef.h>
++#include <stdbool.h>
++struct work_struct { int x; };
++struct netdev_bpf { int command; struct { void *pool; unsigned queue_id; } xsk; };
++struct net_device;
++struct netdev_ops { int (*ndo_bpf)(struct net_device *,struct netdev_bpf *); };
++struct net_device { const struct netdev_ops *netdev_ops; };
++struct xdp_umem { bool zc; };
++struct xsk_buff_pool { struct work_struct work; struct net_device *netdev; struct xdp_umem *umem; unsigned queue_id; int dev_node; void *fq,*cq; };
++#include "bnxt_xsk_lifecycle.h"
++static int locked,warnings,called,cleared,devput,queues,umemput,destroyed;
++static unsigned fail_at,step,unmaps;
++static struct bnxt_xsk_lc lifecycle;
++static int check(void *c,const struct bnxt_xsk_lc *l) { (void)c;(void)l;return 0; }
++static int action(void *c) { (void)c;return ++step==fail_at ? -EIO : 0; }
++static int ring_action(void *c,const struct bnxt_xsk_lc_ring *r) { (void)r;return action(c); }
++static void unmap(void *c) { (void)c;unmaps++; }
++static const struct bnxt_xsk_lc_ops lifecycle_ops={check,action,ring_action,action,ring_action,action,unmap};
++#define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
++#define ASSERT_RTNL() assert(locked)
++#define XDP_SETUP_XSK_POOL 7
++#define WARN(c,...) (warnings+=(c))
++static void rtnl_lock(void) { assert(!locked);locked=1; }
++static void rtnl_unlock(void) { assert(locked);locked=0; }
++static int detach(struct net_device *n,struct netdev_bpf *b) { (void)n;called++;assert(locked&&!b->xsk.pool&&b->xsk.queue_id==1);return bnxt_xsk_lc_detach(&lifecycle,&lifecycle_ops,0); }
++static void xsk_clear_pool_at_qid(struct net_device *n,unsigned q) { (void)n;assert(q==1);cleared++; }
++#define netdev_assert_locked_ops_compat(n) ((void)(n))
++#define netdev_lock_ops(n) ((void)(n))
++#define netdev_unlock_ops(n) ((void)(n))
++#define hlist_del(n) ((void)(n))
++static void dev_put(struct net_device *n) { (void)n;devput++; }
++static void xskq_destroy(void *q) { assert(q);queues++; }
++static void xdp_put_umem(struct xdp_umem *u,bool deferred) { (void)u;assert(!deferred&&!locked);umemput++; }
++static void xp_destroy(struct xsk_buff_pool *p) { assert(!p->netdev&&umemput==1);destroyed++; }
++'''+''.join(functions)+r'''
++int main(void) {
++ const struct netdev_ops ops={detach};struct net_device net={&ops};
++ const struct bnxt_xsk_lc_ring rings[]={{1,10},{2,20},{2,21}};
++ for (unsigned i=0;i<=9;i++) {
++  struct xdp_umem umem={true};struct xsk_buff_pool p={.netdev=&net,.umem=&umem,.queue_id=1,.fq=&net,.cq=&net};
++  called=cleared=devput=queues=umemput=destroyed=warnings=0;
++  lifecycle=(struct bnxt_xsk_lc){0};fail_at=i;step=unmaps=0;
++  assert(!bnxt_xsk_lc_init(&lifecycle,9,rings,3));
++  xp_release_deferred(&p.work);
++  assert(called==1&&cleared==1&&devput==1&&queues==2&&umemput==1&&destroyed==1);
++  assert(warnings==(i!=0));
++  assert(unmaps==(i==0));
++  assert(lifecycle.state==(i ? BNXT_XSK_LC_FAILED : BNXT_XSK_LC_UNMAPPED));
++ }
++ return 0;
++}
++'''
++    with tempfile.TemporaryDirectory() as tmp:
++        c=Path(tmp)/'release.c';exe=Path(tmp)/'release';c.write_text(code)
++        subprocess.run(['gcc','-std=c17','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-fno-omit-frame-pointer','-I'+str(Path(__file__).resolve().parents[1]),str(c),'-o',str(exe)],check=True)
++        subprocess.run([str(exe)],check=True)
++    print(f'upstream v{version}: release continues after driver error (actual control flow, mocked resources)')
+--- /dev/null
++++ b/tests/test_lifecycle_coordinator.c
+@@ -0,0 +1,98 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#include <assert.h>
++#include <string.h>
++#include "../bnxt_xsk_lifecycle.h"
++struct fixture {
++ struct bnxt_xsk_lc *s;
++ const struct bnxt_xsk_lc_ops *ops;
++ unsigned int step, fail_step, mutate_step, unmapped, missing, reenter;
++ unsigned int reclaim_order[3], reclaimed;
++ unsigned long long generation;
++};
++static int check(void *v,const struct bnxt_xsk_lc *s) {
++ struct fixture *f=v;
++ if (f->missing || s->count!=3) return -EINVAL;
++ unsigned int found=0;
++ for (unsigned int i=0;i<s->count;i++) {
++  if (s->ring[i].kind==BNXT_XSK_LC_RX && s->ring[i].id==10) found|=1;
++  else if (s->ring[i].kind==BNXT_XSK_LC_TX && s->ring[i].id==20) found|=2;
++  else if (s->ring[i].kind==BNXT_XSK_LC_TX && s->ring[i].id==21) found|=4;
++  else return -EINVAL;
++ }
++ if (found!=7) return -EINVAL;
++ return f->generation==s->generation ? 0 : -ESTALE;
++}
++static int event(struct fixture *f) {
++ ++f->step;
++ if (f->step==f->mutate_step) ++f->generation;
++ return f->step==f->fail_step ? -EIO : 0;
++}
++static int fence(void *v) { return event(v); }
++static int drain(void *v,const struct bnxt_xsk_lc_ring *r) {
++ struct fixture *f=v;
++ if (f->reenter) assert(bnxt_xsk_lc_detach(f->s,f->ops,f)==-EALREADY);
++ assert(r->id==10 || r->id==20 || r->id==21);
++ return event(f);
++}
++static int sync_napi(void *v) {
++ struct fixture *f=v;
++ assert(f->s->drained[0]&&f->s->drained[1]&&f->s->drained[2]);
++ return event(f);
++}
++static int reclaim(void *v,const struct bnxt_xsk_lc_ring *r) {
++ struct fixture *f=v;
++ f->reclaim_order[f->reclaimed++]=r->id;
++ return event(f);
++}
++static int empty(void *v) {
++ struct fixture *f=v;
++ assert(f->reclaimed==3);
++ assert(f->reclaim_order[0]==20&&f->reclaim_order[1]==21&&f->reclaim_order[2]==10);
++ return event(f);
++}
++static void unmap(void *v) {
++ struct fixture *f=v;
++ assert(f->s->state==BNXT_XSK_LC_UNMAPPED);
++ assert(f->step==9); assert(!f->unmapped++);
++ assert(bnxt_xsk_lc_detach(f->s,f->ops,f)==-EALREADY);
++}
++static const struct bnxt_xsk_lc_ops ops={check,fence,drain,sync_napi,reclaim,empty,unmap};
++static const struct bnxt_xsk_lc_ring rings[]={{BNXT_XSK_LC_RX,10},{BNXT_XSK_LC_TX,20},{BNXT_XSK_LC_TX,21}};
++static void run(unsigned int failure,unsigned int mutation) {
++ struct bnxt_xsk_lc s={0};
++ struct fixture f={.s=&s,.ops=&ops,.generation=9,.fail_step=failure,.mutate_step=mutation,.reenter=1};
++ assert(!bnxt_xsk_lc_init(&s,9,rings,3));
++ assert(bnxt_xsk_lc_init(&s,9,rings,3)==-EALREADY);
++ int rc=bnxt_xsk_lc_detach(&s,&ops,&f);
++ if (failure || mutation) {
++  assert(rc==(failure ? -EIO : -ESTALE));assert(!f.unmapped);
++  assert(s.state==BNXT_XSK_LC_FAILED);
++  if (failure==4) assert(s.drained[0]&&s.drained[1]&&!s.drained[2]);
++ } else { assert(!rc&&f.unmapped==1); }
++ unsigned int steps=f.step;
++ assert(bnxt_xsk_lc_detach(&s,&ops,&f)==-EALREADY);assert(steps==f.step);
++}
++int main(void) {
++ run(0,0);
++ for (unsigned int i=1;i<=9;i++) { run(i,0);run(0,i); }
++ struct bnxt_xsk_lc s={0};
++ struct bnxt_xsk_lc_ring dup[]={{BNXT_XSK_LC_TX,20},{BNXT_XSK_LC_TX,20}};
++ assert(bnxt_xsk_lc_init(&s,9,dup,2)==-EINVAL&&!s.state);
++ assert(bnxt_xsk_lc_init(&s,9,rings,0)==-EINVAL);
++ assert(bnxt_xsk_lc_init(&s,9,rings,65)==-EINVAL);
++ assert(!bnxt_xsk_lc_init(&s,9,rings,3));
++ struct fixture f={.s=&s,.ops=&ops,.generation=9,.missing=1};
++ assert(bnxt_xsk_lc_detach(&s,&ops,&f)==-EINVAL&&!f.step&&!f.unmapped);
++ struct bnxt_xsk_lc wrong={0};
++ struct bnxt_xsk_lc_ring input[3]; memcpy(input,rings,sizeof(input));
++ input[2].id=22;
++ assert(!bnxt_xsk_lc_init(&wrong,9,input,3));
++ f=(struct fixture){.s=&wrong,.ops=&ops,.generation=9};
++ assert(bnxt_xsk_lc_detach(&wrong,&ops,&f)==-EINVAL&&!f.step&&!f.unmapped);
++ struct bnxt_xsk_lc copied={0}; memcpy(input,rings,sizeof(input));
++ assert(!bnxt_xsk_lc_init(&copied,9,input,3)); input[2].id=99;
++ assert(copied.ring[2].id==21);
++ f=(struct fixture){.s=&copied,.ops=&ops,.generation=9};
++ assert(!bnxt_xsk_lc_detach(&copied,&ops,&f)&&f.unmapped==1);
++ return 0;
++}
+--- /dev/null
++++ b/tests/test_normal_lifecycle.py
+@@ -0,0 +1,105 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++# Actual candidate functions; mocked hardware/close/open. No load/DMA proof.
++from pathlib import Path
++import subprocess,tempfile,re
++root=Path(__file__).resolve().parents[1]
++s=(root/'bnxt_xsk.c').read_text();main=(root/'bnxt.c').read_text();xdp=(root/'bnxt_xdp.c').read_text()
++def extract(src,sig):
++ a=src.index(sig);return src[a:src.index('\n}\n',a)+3]
++code=r'''
++#include <assert.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <errno.h>
++#include <stddef.h>
++typedef uint16_t u16;typedef uint32_t u32;
++#define READ_ONCE(x) (x)
++#define BNXT_STATE_OPEN 0
++#define BNXT_STATE_IN_FW_RESET 1
++#define BNXT_STATE_ABORT_ERR 2
++#define BNXT_FLAG_SHARED_RINGS 1
++#define BNXT_TX_XDP_RDIR_RING_BASE(bp) ((bp)->txbase)
++#define DMA_ATTR_SKIP_CPU_SYNC 1
++#define DMA_ATTR_WEAK_ORDERING 2
++#define BNXT_MAX_XSK_RINGS 8
++#define BNXT_RING_RX_ZC_MODE(r) ((r)->zc)
++#define BNXT_XSK_TX 7
++#define XDP_TX 3
++#define XDP_REDIRECT 4
++#define RING_TX(bp,n) ((n)&(bp)->mask)
++#define NEXT_TX(n) ((u16)((n)+1))
++struct device {int n;};struct pci {struct device dev;};
++struct netdev {bool running;};struct xsk_buff_pool {int n;};
++struct bnxt_sw_tx_bd {unsigned action;};
++struct bnxt_tx_ring_info {u16 tx_cons,tx_prod;struct xsk_buff_pool *xsk_pool;struct bnxt_sw_tx_bd *tx_buf_ring;};
++struct rx {struct xsk_buff_pool *xsk_pool;unsigned rx_prod;bool zc;};
++struct bnxt {struct netdev *dev;struct pci *pdev;void *xdp_prog,*bnapi;struct rx *rx_ring;struct bnxt_tx_ring_info *tx_ring;unsigned long state,*af_xdp_zc_qs;unsigned flags,txbase,rx_buf_use_size,mask,rx_ring_size,rx_nr_rings;};
++static struct xsk_buff_pool pool;
++static unsigned events[40],count,maps,unmaps,completions;
++static int validate_rc,bounds_rc,map_rc,open_rc;
++static bool mapping,live,closed,opening;
++static unsigned fill=8,posted=8;static bool shrink;
++static struct rx rxrings[2];static struct bnxt_tx_ring_info txrings[2];
++static bool bitmap_empty(unsigned long *p,unsigned n){(void)n;return !*p;}
++static bool xsk_buff_can_alloc(struct xsk_buff_pool *p,unsigned n){(void)p;return fill>=n;}
++static void netif_close(struct netdev *dev){dev->running=false;}
++static bool test_bit(unsigned n,unsigned long *p){return !!(*p&(1UL<<n));}
++static void set_bit(unsigned n,unsigned long *p){*p|=1UL<<n;}
++static void clear_bit(unsigned n,unsigned long *p){*p&=~(1UL<<n);}
++static bool netif_running(struct netdev *dev){return dev->running;}
++static int bnxt_validate_xsk(struct bnxt *bp,u16 q){(void)bp;(void)q;return validate_rc;}
++static int bnxt_xsk_validate_pool(struct bnxt *bp,struct xsk_buff_pool *p,u32 len){(void)bp;(void)p;(void)len;return bounds_rc;}
++static int xsk_pool_dma_map(struct xsk_buff_pool *p,struct device *d,int attrs){(void)d;assert(p==&pool&&attrs==3);events[count++]=1;if(map_rc)return map_rc;maps++;mapping=true;return 0;}
++static void xsk_pool_dma_unmap(struct xsk_buff_pool *p,int attrs){assert(p==&pool&&attrs==3&&mapping&&!live&&!opening);events[count++]=4;mapping=false;unmaps++;}
++static struct xsk_buff_pool *xsk_get_pool_from_qid(struct netdev *d,u16 q){(void)d;(void)q;return &pool;}
++static void bnxt_close_nic(struct bnxt *bp,bool irq,bool link){assert(irq&&!link);events[count++]=2;assert(!live||mapping);live=false;closed=true;clear_bit(BNXT_STATE_OPEN,&bp->state);bp->rx_ring=NULL;bp->tx_ring=NULL;bp->bnapi=NULL;}
++static int bnxt_open_nic(struct bnxt *bp,bool irq,bool link){assert(irq&&!link&&closed);events[count++]=3;opening=true;assert(!test_bit(0,bp->af_xdp_zc_qs)||mapping);if(open_rc){live=false;bp->dev->running=false;}else{live=test_bit(0,bp->af_xdp_zc_qs);set_bit(BNXT_STATE_OPEN,&bp->state);bp->rx_ring=rxrings;bp->tx_ring=txrings;bp->bnapi=(void*)1;rxrings[0]=(struct rx){live?&pool:NULL,posted,live};txrings[0].xsk_pool=live?&pool:NULL;}if(shrink)bp->rx_nr_rings=bp->txbase=0;opening=false;return open_rc;}
++static void xsk_tx_completed(struct xsk_buff_pool *p,unsigned n){assert(p==&pool);completions+=n;}
++'''
++for sig in ['static int bnxt_xdp_enable_pool(', 'static int bnxt_xdp_disable_pool(', 'void bnxt_xsk_reclaim_tx(']:code+=extract(s,sig)
++code+=r'''
++static void reset(struct bnxt *bp,struct netdev *dev,unsigned long *bits){*bits=0;*dev=(struct netdev){true};*bp=(struct bnxt){.dev=dev,.xdp_prog=(void*)1,.rx_ring=(void*)1,.tx_ring=(void*)1,.bnapi=(void*)1,.state=1,.af_xdp_zc_qs=bits,.flags=1,.txbase=2,.mask=7,.rx_ring_size=8,.rx_nr_rings=2};static struct pci pci;bp->pdev=&pci;count=maps=unmaps=0;validate_rc=bounds_rc=map_rc=open_rc=0;mapping=live=closed=opening=false;fill=posted=8;shrink=false;}
++int main(void){
++ struct bnxt bp;struct netdev dev;unsigned long bits;
++ reset(&bp,&dev,&bits);assert(!bnxt_xdp_enable_pool(&bp,&pool,0));assert(mapping&&live&&maps==1&&count==3&&events[0]==1&&events[1]==2&&events[2]==3);
++ assert(!bnxt_xdp_disable_pool(&bp,0));assert(!mapping&&!live&&!bits&&unmaps==1&&count==6&&events[3]==2&&events[4]==4&&events[5]==3);
++ assert(bnxt_xdp_disable_pool(&bp,0)==-EINVAL&&unmaps==1);
++ for(int stage=0;stage<3;stage++){reset(&bp,&dev,&bits);if(stage==0)validate_rc=-EINVAL;if(stage==1)bounds_rc=-EINVAL;if(stage==2)map_rc=-ENOMEM;assert(bnxt_xdp_enable_pool(&bp,&pool,0)<0);assert(!closed&&!mapping&&!bits&&!unmaps);}
++ reset(&bp,&dev,&bits);open_rc=-ENOMEM;assert(bnxt_xdp_enable_pool(&bp,&pool,0)==-ENOMEM);assert(!bits&&!mapping&&!dev.running&&unmaps==1&&count==4&&events[3]==4);
++ reset(&bp,&dev,&bits);assert(!bnxt_xdp_enable_pool(&bp,&pool,0));open_rc=-ENOMEM;assert(bnxt_xdp_disable_pool(&bp,0)==-ENOMEM);assert(!bits&&!mapping&&!dev.running&&unmaps==1);
++ for(int state=0;state<6;state++){reset(&bp,&dev,&bits);if(state==0)dev.running=false;if(state==1)bp.state=0;if(state==2)bp.xdp_prog=NULL;if(state==3)bp.state|=2;if(state==4)bp.state|=4;if(state==5)bits=1;assert(bnxt_xdp_enable_pool(&bp,&pool,0)<0&&!maps&&!closed);}
++ reset(&bp,&dev,&bits);bp.txbase=0;assert(bnxt_xdp_enable_pool(&bp,&pool,0)==-EOPNOTSUPP&&!maps);
++ reset(&bp,&dev,&bits);assert(!bnxt_xdp_enable_pool(&bp,&pool,0));bnxt_close_nic(&bp,true,false);dev.running=false;unsigned before=count;assert(!bnxt_xdp_disable_pool(&bp,0)&&count==before+1&&!mapping);
++ for(unsigned n=0;n<8;n++){reset(&bp,&dev,&bits);fill=n;assert(bnxt_xdp_enable_pool(&bp,&pool,0)==-ENOBUFS&&!maps);}
++ reset(&bp,&dev,&bits);bits=2;assert(bnxt_xdp_enable_pool(&bp,&pool,0)==-EBUSY&&!maps);
++ reset(&bp,&dev,&bits);posted=3;assert(bnxt_xdp_enable_pool(&bp,&pool,0)==-ENOBUFS);assert(!bits&&!mapping&&!live&&!dev.running&&unmaps==1);
++ reset(&bp,&dev,&bits);shrink=true;assert(bnxt_xdp_enable_pool(&bp,&pool,0)==-ENOBUFS&&!mapping&&!bits&&!dev.running);
++ /* Consumer wrap: stale completed slot0 must not be counted. Mixed actions
++    keep RX-backed and redirect ownership for their separate cleanup. */
++ struct bnxt_sw_tx_bd entries[8]={{0}};entries[0].action=BNXT_XSK_TX;entries[6].action=BNXT_XSK_TX;entries[7].action=XDP_TX;entries[1].action=XDP_REDIRECT;
++ struct bnxt_tx_ring_info tx={.tx_cons=65534,.tx_prod=0,.xsk_pool=&pool,.tx_buf_ring=entries};
++ bnxt_xsk_reclaim_tx(&bp,&tx);assert(completions==1&&!entries[6].action&&entries[0].action==BNXT_XSK_TX&&entries[7].action==XDP_TX);
++ bnxt_xsk_reclaim_tx(&bp,&tx);assert(completions==1);
++ tx.tx_cons=1;tx.tx_prod=2;bnxt_xsk_reclaim_tx(&bp,&tx);assert(completions==1&&entries[1].action==XDP_REDIRECT);
++ tx.xsk_pool=NULL;bnxt_xsk_reclaim_tx(&bp,&tx);assert(completions==1);
++ return 0;
++}
++'''
++# Critical real-source control sites: no FILL mode selection; both allocations
++# consult the bitmap; close calls TX reclamation before RX reclamation.
++rx=extract(main,'static int bnxt_alloc_rx_rings(')
++assert 'xsk_buff_can_alloc' not in rx
++assert 'bp->af_xdp_zc_qs && test_bit(i, bp->af_xdp_zc_qs)' in rx
++assert re.search(r'txr->xsk_pool = bp->af_xdp_zc_qs &&\s*test_bit\(i, bp->af_xdp_zc_qs\)',main)
++cleanup=extract(main,'static void bnxt_free_skbs(')
++assert cleanup.index('bnxt_free_tx_skbs')<cleanup.index('bnxt_free_rx_skbs')
++assert 'bnxt_xsk_reclaim_tx(bp, txr)' in extract(main,'static void bnxt_free_one_tx_ring_skbs(')
++completion=extract(xdp,'static void __bnxt_tx_int_xdp(')
++assert re.search(r'action == BNXT_XSK_TX\) \{\s*tx_buf->action = 0;\s*xsk_tx\+\+;',completion)
++assert 'rx_doorbell_needed = false;' not in completion[completion.index('action == BNXT_XSK_TX'):]
++with tempfile.TemporaryDirectory() as tmp:
++ c=Path(tmp)/'normal.c';exe=Path(tmp)/'normal';c.write_text(code)
++ subprocess.run(['gcc','-std=c17','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-fno-omit-frame-pointer',str(c),'-o',str(exe)],check=True)
++ subprocess.run([str(exe)],check=True)
++print('PASS actual attach/detach/reclaim: normal sequencing, map/open failure, down detach, repeat rejection, wrapped pending raw TX, separate RX-backed/redirect ownership. Hardware close/open mocked; source wiring asserted.')
+--- /dev/null
++++ b/tests/test_pci_disable.py
+@@ -0,0 +1,53 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++# Actual upstream PCI control flow, mocked config space; no hardware accessed.
++from pathlib import Path
++import subprocess,tempfile
++root=Path(__file__).resolve().parents[2]/'lifetime-research'
++for version in ['v6.8','current']:
++    source=(root/f'{version}-pci.c').read_text()
++    parts=[]
++    for name in ['do_pci_disable_device','pci_disable_device']:
++        start=source.index('void '+name+'(')
++        parts.append(source[start:source.index('\n}\n',start)+3])
++    common=r'''
++#include <assert.h>
++#include <stdint.h>
++typedef uint16_t u16;
++#define PCI_COMMAND 4
++#define PCI_COMMAND_MASTER 4
++struct pci_dev { int dev,enable_cnt,is_busmaster; u16 command; };
++static int fail_read,fail_write,reads,writes;
++#define dev_WARN_ONCE(...) ((void)0)
++#define atomic_read(p) (*(p))
++#define atomic_dec_return(p) (--*(p))
++static int pci_read_config_word(struct pci_dev *p,int off,u16 *v) { assert(off==PCI_COMMAND);reads++;*v=fail_read?65535:p->command;return fail_read?-5:0; }
++static int pci_write_config_word(struct pci_dev *p,int off,u16 v) { assert(off==PCI_COMMAND);writes++;if(fail_write)return -5;p->command=v;return 0; }
++static void pcibios_disable_device(struct pci_dev *p) { (void)p; }
++'''
++    common += ('struct pci_devres { int enabled; };\nstatic struct pci_devres *find_pci_dr(struct pci_dev *p) { (void)p; return 0; }\n' if version=='v6.8' else 'static void pci_host_bridge_disable_device(struct pci_dev *p) { (void)p; }\n')
++    code=common+''.join(parts)+r'''
++int main(void) {
++ struct pci_dev p={.enable_cnt=2,.is_busmaster=1,.command=PCI_COMMAND_MASTER};
++ pci_disable_device(&p);assert(p.enable_cnt==1&&!reads&&!writes&&p.command==PCI_COMMAND_MASTER);
++ pci_disable_device(&p);assert(p.enable_cnt==0&&reads==1&&writes==1&&!(p.command&PCI_COMMAND_MASTER));
++ p=(struct pci_dev){.enable_cnt=1,.is_busmaster=1,.command=PCI_COMMAND_MASTER};
++ fail_write=1;fail_read=0;
++ pci_disable_device(&p);
++ assert(p.command&PCI_COMMAND_MASTER);assert(!p.is_busmaster);
++ p=(struct pci_dev){.enable_cnt=1,.is_busmaster=1,.command=PCI_COMMAND_MASTER};
++ fail_read=1;fail_write=0;
++ pci_disable_device(&p);
++ assert(p.command==(65535U & ~PCI_COMMAND_MASTER));assert(!p.is_busmaster);
++ p=(struct pci_dev){.enable_cnt=1,.is_busmaster=1,.command=PCI_COMMAND_MASTER};
++ fail_read=fail_write=1;
++ pci_disable_device(&p);
++ assert(p.command&PCI_COMMAND_MASTER);assert(!p.is_busmaster);
++ return 0;
++}
++'''
++    with tempfile.TemporaryDirectory() as tmp:
++        c=Path(tmp)/'pci.c';exe=Path(tmp)/'pci';c.write_text(code)
++        subprocess.run(['gcc','-std=c17','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-fno-omit-frame-pointer',str(c),'-o',str(exe)],check=True)
++        subprocess.run([str(exe)],check=True)
++    print(version+': PCI disable is not an unconditional checked DMA fence (actual flow, mocked config space)')
+--- /dev/null
++++ b/tests/test_pool_lifecycle.py
+@@ -0,0 +1,162 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++"""Actual-source units with mocked pool/firmware APIs; no DMA or kernel proof."""
++from pathlib import Path
++import subprocess, tempfile
++root=Path(__file__).resolve().parents[1]
++xsk=(root/'bnxt_xsk.c').read_text()
++net=(root/'bnxt.c').read_text()
++def function(source, name):
++    start=source.index('int '+name+'(')
++    return source[start:source.index('\n}\n',start)+3]
++capacity=function(xsk,'bnxt_xsk_validate_pool')
++rx=function(net,'bnxt_hwrm_xsk_rx_quiesce')
++tx=function(net,'bnxt_hwrm_xsk_tx_quiesce')
++sender=function(net,'bnxt_hwrm_ring_free_send_checked')
++legacy=function(net,'hwrm_ring_free_send_msg')
++start=net.index('\tif (BNXT_RING_RX_ZC_MODE(rxr) && rxr->xsk_pool) {',net.index('int bnxt_alloc_rx_data('))
++end=net.index('\t} else if (BNXT_RX_PAGE_MODE(bp)) {',start)
++allocation=net[start:end]+'\t}\n'
++code=r'''
++#include <assert.h>
++#include <errno.h>
++#include <stdint.h>
++#include <stdbool.h>
++typedef uint16_t u16;
++typedef uint32_t u32;
++typedef uint64_t dma_addr_t;
++#define BNXT_FLAG_AGG_RINGS 1U
++#define INVALID_HW_RING_ID 65535U
++#define RING_FREE_REQ_RING_TYPE_RX 2U
++#define RING_FREE_REQ_RING_TYPE_TX 1U
++#define BNXT_NO_FW_ACCESS(bp) no_fw_access(bp)
++#define cpu_to_le16(x) (x)
++#define le32_to_cpu(x) (x)
++#define RX_BD_LEN_SHIFT 16
++#define le16_to_cpu(x) (x)
++#define netdev_err(...) ((void)0)
++#define HWRM_RING_FREE 1
++#define BNXT_RING_RX_ZC_MODE(rxr) ((rxr)->zc)
++struct xsk_buff_pool { u32 chunk, headroom; };
++struct bnxt_ring_struct { u32 fw_ring_id; };
++struct bnxt_napi { u32 index; };
++struct bnxt_grp { u32 rx_fw_ring_id; };
++struct bnxt { u32 flags, rx_buf_use_size, rx_dma_offset; bool no_fw; struct bnxt_grp grp_info[2]; };
++struct bnxt_rx_ring_info { struct bnxt_ring_struct rx_ring_struct; struct bnxt_napi *bnapi; struct xsk_buff_pool *xsk_pool; bool zc; };
++struct bnxt_tx_ring_info { struct bnxt_ring_struct tx_ring_struct; };
++struct bnxt_sw_rx_bd { void *data; };
++struct rx_bd { u32 rx_bd_len_flags_type; };
++static struct rx_bd descriptor={1536U<<16};
++static u32 xsk_pool_get_chunk_size(struct xsk_buff_pool *p) { return p->chunk; }
++static u32 xsk_pool_get_headroom(struct xsk_buff_pool *p) { return p->headroom; }
++static unsigned allocs, dma_reads;
++static bool alloc_failure;
++static int backing;
++static void *xsk_buff_alloc(struct xsk_buff_pool *p) { (void)p; allocs++; return alloc_failure ? 0 : &backing; }
++static dma_addr_t xsk_buff_xdp_get_dma(void *p) { assert(p==&backing); dma_reads++; return 1234; }
++static unsigned fw_checks, fail_at_check;
++static bool no_fw_access(struct bnxt *b) {
++ fw_checks++;
++ return b->no_fw || (fail_at_check && fw_checks>=fail_at_check);
++}
++static u32 cp=7, last_cp, last_type;
++static int fw_rc;
++static unsigned requests;
++static u32 bnxt_cp_ring_for_rx(struct bnxt *b, struct bnxt_rx_ring_info *r) { (void)b;(void)r;return cp; }
++static u32 bnxt_cp_ring_for_tx(struct bnxt *b, struct bnxt_tx_ring_info *r) { (void)b;(void)r;return cp; }
++struct hwrm_ring_free_input { u16 cmpl_ring, ring_id; u32 ring_type; };
++struct hwrm_ring_free_output { u16 error_code; };
++static struct hwrm_ring_free_input request;
++static struct hwrm_ring_free_output response;
++static int init_rc;
++static unsigned drops;
++#define hwrm_req_init(b,req,op) ((void)(b),(void)(op),(req)=&request,init_rc)
++static struct hwrm_ring_free_output *hwrm_req_hold(struct bnxt *b,struct hwrm_ring_free_input *q) { (void)b;(void)q;return &response; }
++static int hwrm_req_send(struct bnxt *b,struct hwrm_ring_free_input *q) {
++ (void)b; requests++;last_cp=q->cmpl_ring;last_type=q->ring_type;return fw_rc;
++}
++static void hwrm_req_drop(struct bnxt *b,struct hwrm_ring_free_input *q) { (void)b;(void)q;drops++; }
++'''+capacity+sender+legacy+rx+tx+r'''
++static int actual_alloc_branch(struct bnxt *bp,struct bnxt_rx_ring_info *rxr,struct bnxt_sw_rx_bd *rx_buf) {
++ struct rx_bd *rxbd=&descriptor;
++ dma_addr_t mapping=0;
++'''+allocation+r'''
++ assert(mapping==1234); return 0;
++}
++int main(void) {
++ struct bnxt b={.rx_buf_use_size=1536,.rx_dma_offset=256};
++ struct xsk_buff_pool p={2048,256};
++ struct bnxt_napi n={1};
++ struct bnxt_rx_ring_info r={{11},&n,&p,true};
++ struct bnxt_tx_ring_info t={{12}};
++ struct bnxt_sw_rx_bd buf={0};
++ assert(!bnxt_xsk_validate_pool(&b,&p,b.rx_buf_use_size));
++ b.rx_buf_use_size=1792; assert(!bnxt_xsk_validate_pool(&b,&p,b.rx_buf_use_size));
++ b.rx_buf_use_size=1793; assert(bnxt_xsk_validate_pool(&b,&p,b.rx_buf_use_size)==-EINVAL);
++ descriptor.rx_bd_len_flags_type=1793U<<16;
++ assert(actual_alloc_branch(&b,&r,&buf)==-EINVAL); assert(!allocs&&!dma_reads&&!buf.data);
++ p.headroom=UINT32_MAX; assert(bnxt_xsk_validate_pool(&b,&p,b.rx_buf_use_size)==-EINVAL);
++ p.headroom=2048; assert(bnxt_xsk_validate_pool(&b,&p,b.rx_buf_use_size)==-EINVAL);
++ p.headroom=256; b.rx_buf_use_size=0; assert(bnxt_xsk_validate_pool(&b,&p,b.rx_buf_use_size)==-EINVAL);
++ b.rx_buf_use_size=1536; descriptor.rx_bd_len_flags_type=1536U<<16; p.headroom=320;
++ assert(actual_alloc_branch(&b,&r,&buf)==-EOPNOTSUPP); assert(!allocs&&!dma_reads); assert(b.rx_dma_offset==256);
++ p.headroom=256; b.flags=BNXT_FLAG_AGG_RINGS;
++ assert(actual_alloc_branch(&b,&r,&buf)==-EOPNOTSUPP); assert(!allocs&&!dma_reads);
++ b.flags=0; alloc_failure=true;
++ assert(actual_alloc_branch(&b,&r,&buf)==-ENOMEM); assert(allocs==1&&!dma_reads);
++ alloc_failure=false;
++ assert(!actual_alloc_branch(&b,&r,&buf)); assert(allocs==2&&dma_reads==1); assert(b.rx_dma_offset==256);
++ // Model a later MTU/span change by re-entering the real refill branch.
++ b.rx_buf_use_size=1536; descriptor.rx_bd_len_flags_type=3840U<<16;
++ assert(actual_alloc_branch(&b,&r,&buf)==-EINVAL); assert(allocs==2&&dma_reads==1);
++ b.rx_buf_use_size=3840; p.chunk=4096; assert(!bnxt_xsk_validate_pool(&b,&p,b.rx_buf_use_size));
++ b.rx_buf_use_size=3841; assert(bnxt_xsk_validate_pool(&b,&p,b.rx_buf_use_size)==-EINVAL);
++ b.grp_info[0].rx_fw_ring_id=99;b.grp_info[1].rx_fw_ring_id=11;
++ b.no_fw=true;
++ assert(bnxt_hwrm_xsk_rx_quiesce(&b,&r)==-ENODEV);
++ assert(bnxt_hwrm_xsk_tx_quiesce(&b,&t)==-ENODEV); assert(!requests);
++ b.no_fw=false;cp=INVALID_HW_RING_ID;
++ assert(bnxt_hwrm_xsk_rx_quiesce(&b,&r)==-EINVAL);
++ assert(bnxt_hwrm_xsk_tx_quiesce(&b,&t)==-EINVAL); assert(!requests);
++ cp=7;
++ // Firmware disappears between the helper check and actual send-path check.
++ fw_checks=0;fail_at_check=2;
++ assert(bnxt_hwrm_xsk_rx_quiesce(&b,&r)==-ENODEV);
++ assert(!requests&&r.rx_ring_struct.fw_ring_id==11&&b.grp_info[1].rx_fw_ring_id==11);
++ fw_checks=0;
++ assert(bnxt_hwrm_xsk_tx_quiesce(&b,&t)==-ENODEV);
++ assert(!requests&&t.tx_ring_struct.fw_ring_id==12);
++ fail_at_check=0;init_rc=-ENOMEM;
++ assert(bnxt_hwrm_xsk_rx_quiesce(&b,&r)==-ENOMEM);assert(!requests&&!drops);
++ init_rc=0;fw_rc=-ETIMEDOUT;
++ assert(bnxt_hwrm_xsk_rx_quiesce(&b,&r)==-ETIMEDOUT);
++ assert(r.rx_ring_struct.fw_ring_id==11&&b.grp_info[1].rx_fw_ring_id==11);
++ assert(last_cp==7&&last_type==RING_FREE_REQ_RING_TYPE_RX);
++ fw_rc=-EIO;assert(bnxt_hwrm_xsk_tx_quiesce(&b,&t)==-EIO);
++ assert(t.tx_ring_struct.fw_ring_id==12&&last_type==RING_FREE_REQ_RING_TYPE_TX);
++ assert(last_cp==7&&requests==2);
++ fw_rc=0;response.error_code=1;
++ assert(bnxt_hwrm_xsk_rx_quiesce(&b,&r)==-EIO);
++ assert(bnxt_hwrm_xsk_tx_quiesce(&b,&t)==-EIO);
++ assert(r.rx_ring_struct.fw_ring_id==11&&b.grp_info[1].rx_fw_ring_id==11&&t.tx_ring_struct.fw_ring_id==12);
++ assert(requests==4);response.error_code=0;
++ assert(!bnxt_hwrm_xsk_rx_quiesce(&b,&r));
++ assert(r.rx_ring_struct.fw_ring_id==INVALID_HW_RING_ID&&b.grp_info[1].rx_fw_ring_id==INVALID_HW_RING_ID);
++ assert(b.grp_info[0].rx_fw_ring_id==99&&t.tx_ring_struct.fw_ring_id==12);
++ assert(!bnxt_hwrm_xsk_tx_quiesce(&b,&t));assert(t.tx_ring_struct.fw_ring_id==INVALID_HW_RING_ID);
++ assert(requests==6);
++ assert(bnxt_hwrm_xsk_rx_quiesce(&b,&r)==-EINVAL);
++ assert(bnxt_hwrm_xsk_tx_quiesce(&b,&t)==-EINVAL);assert(requests==6);
++ // Legacy callers keep their historical no-command success behavior.
++ b.no_fw=true;
++ assert(!hwrm_ring_free_send_msg(&b,&t.tx_ring_struct,RING_FREE_REQ_RING_TYPE_TX,INVALID_HW_RING_ID));
++ assert(bnxt_hwrm_ring_free_send_checked(&b,&t.tx_ring_struct,RING_FREE_REQ_RING_TYPE_TX,INVALID_HW_RING_ID,true)==-EINVAL);
++ assert(requests==6);
++ return 0;
++}
++''' 
++with tempfile.TemporaryDirectory() as tmp:
++    c=Path(tmp)/'lifecycle.c'; exe=Path(tmp)/'lifecycle'; c.write_text(code)
++    subprocess.run(['gcc','-std=c17','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-fno-omit-frame-pointer',str(c),'-o',str(exe)],check=True)
++    subprocess.run([str(exe)],check=True)
++print('pool capacity/refill and checked RX/TX ownership: PASS (actual source; mocked firmware and pool)')
+--- /dev/null
++++ b/tests/test_pool_reference.py
+@@ -0,0 +1,47 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++# Core-only early-reference lifetime experiment; NOT a driver API/implementation.
++from pathlib import Path
++import subprocess,tempfile
++base=Path(__file__).resolve().parents[2]
++for version in ['6.8','current']:
++    p=base/('kernel-reference/xsk_buff_pool-v6.8.c' if version=='6.8' else 'lifetime-research/current-xsk_buff_pool.c')
++    source=p.read_text();parts=[]
++    for ret,name in [('void','xp_get_pool'),('bool','xp_put_pool')]:
++        start=source.index(ret+' '+name+'(');parts.append(source[start:source.index('\n}\n',start)+3])
++    code=r'''
++#include <assert.h>
++#include <stdbool.h>
++struct work_struct { void (*fn)(struct work_struct *); };
++struct xsk_buff_pool { unsigned users; struct work_struct work; };
++static unsigned queued,destroyed,quiesced;
++static void xp_release_deferred(struct work_struct *w) { (void)w;assert(quiesced);destroyed++; }
++static void refcount_inc(unsigned *n) { assert(*n);++*n; }
++static bool refcount_dec_and_test(unsigned *n) { assert(*n);return !--*n; }
++#define INIT_WORK(w,f) ((w)->fn=(f))
++static bool schedule_work(struct work_struct *w) { assert(w->fn);queued++;return true; }
++#define system_freezable_wq 0
++#define queue_work(q,w) ((void)(q),schedule_work(w))
++'''+''.join(parts)+r'''
++int main(void) {
++ struct xsk_buff_pool pool={.users=1};
++ xp_get_pool(&pool); /* second socket */
++ xp_get_pool(&pool); /* proposed independent core lifetime owner, acquired early */
++ assert(!xp_put_pool(&pool));assert(!xp_put_pool(&pool));
++ assert(pool.users==1&&!queued&&!destroyed);
++ /* Waiting for final-release callback to drop its own reference deadlocks. */
++ assert(!pool.work.fn);
++ /* Independent recovery failure retains the early reference and backing owner. */
++ assert(pool.users==1&&!queued&&!quiesced);
++ /* Independent successful quiescence (mocked, not a hardware assertion). */
++ quiesced=1;
++ assert(xp_put_pool(&pool));assert(!pool.users&&queued==1&&!destroyed);
++ pool.work.fn(&pool.work);assert(destroyed==1);
++ return 0;
++}
++'''
++    with tempfile.TemporaryDirectory() as tmp:
++        c=Path(tmp)/'ref.c';exe=Path(tmp)/'ref';c.write_text(code)
++        subprocess.run(['gcc','-std=c17','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-fno-omit-frame-pointer',str(c),'-o',str(exe)],check=True)
++        subprocess.run([str(exe)],check=True)
++    print(version+': early core reference retains lifetime; callback-dependent release cycle exposed; independent release tested')
+--- /dev/null
++++ b/tests/test_provider_lifetime.py
+@@ -0,0 +1,77 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++# Bjorn Topel RFC09 function bodies; isolated mocked dependencies, not kernel integration.
++from pathlib import Path
++import subprocess,tempfile
++root=Path(__file__).resolve().parents[2]
++raw=(root/'provider-research/rfc09.eml').read_text()
++source='\n'.join(line[1:] for line in raw.splitlines() if line.startswith('+') and not line.startswith('+++'))+'\n'
++def function(signature):
++ start=source.index(signature+'\n{')
++ return source[start:source.index('\n}\n',start)+3]
++code=r'''
++#include <assert.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stddef.h>
++typedef uint32_t u32;
++typedef uint8_t u8;
++#define HZ 100UL
++#define XSK_POOL_RELEASE_RETRY_MAX (60*HZ)
++#define XSK_PAGE_POOL_DMA_ATTR 1
++#define PAGE_SIZE 4096
++#define SZ_4K 4096
++#define EOPNOTSUPP 95
++#define NL_SET_ERR_MSG(a,b) ((void)(a))
++#define WARN_ON_ONCE(x) (x)
++#define min_t(t,a,b) ((t)(a)<(t)(b)?(t)(a):(t)(b))
++struct xsk_pp { bool detached; unsigned nr_pools; int lock; u8 release_retries; };
++struct dma_map { void *netdev; };
++struct xsk_buff_pool { struct xsk_pp *pp; struct dma_map *dma_map; int work; bool unaligned; unsigned chunk_size; };
++struct page_pool { void *mp_priv; };
++struct netlink_ext_ack { int unused; };
++static unsigned unmaps,frees,schedules;
++static unsigned long last_delay;
++static void spin_lock_bh(int *lock) { assert(!*lock);*lock=1; }
++static void spin_unlock_bh(int *lock) { assert(*lock);*lock=0; }
++static void xsk_pool_dma_unmap(struct xsk_buff_pool *p,int attr) { assert(attr==1);if(p->dma_map){unmaps++;p->dma_map=0;} }
++static void xp_pp_free(struct xsk_buff_pool *p) { assert(p->pp&&!p->pp->nr_pools);p->pp=0;frees++; }
++static void schedule_delayed_work(int *work,unsigned long delay) { (void)work;last_delay=delay;schedules++; }
++'''
++for sig in ['static void xp_pp_destroy(struct page_pool *pp)','static bool xp_pp_teardown(struct xsk_buff_pool *pool)','static void xp_pp_retry_release(struct xsk_buff_pool *pool)','static void xp_pp_force_dma_unmap(struct xsk_buff_pool *pool)','static int xsk_pool_validate_page_pool(struct xsk_buff_pool *pool,\n\t\t\t\t       struct netlink_ext_ack *extack)']:
++ code+=function(sig)
++code+=r'''
++int main(void) {
++ struct dma_map map={.netdev=(void *)1};
++ struct xsk_pp provider={.nr_pools=2};
++ struct xsk_buff_pool pool={.pp=&provider,.dma_map=&map,.chunk_size=2048};
++ struct page_pool first={&pool},second={&pool};
++ assert(xsk_pool_validate_page_pool(&pool,0)==-EOPNOTSUPP);
++ pool.chunk_size=4096;assert(!xsk_pool_validate_page_pool(&pool,0));
++ pool.unaligned=true;assert(xsk_pool_validate_page_pool(&pool,0)==-EOPNOTSUPP);
++ assert(!xp_pp_teardown(&pool));assert(!unmaps&&!frees);
++ provider.detached=true;
++ for(int i=0;i<20;i++) { assert(!xp_pp_teardown(&pool));xp_pp_retry_release(&pool);assert(last_delay<=60*HZ); }
++ assert(schedules==20&&last_delay==60*HZ&&provider.release_retries==6);
++ assert(!unmaps&&!frees); /* no external progress: retain, never fabricate drain */
++ xp_pp_destroy(&first);assert(provider.nr_pools==1);
++ assert(!xp_pp_teardown(&pool)&&!unmaps&&!frees);
++ xp_pp_destroy(&second);assert(!provider.nr_pools);
++ assert(xp_pp_teardown(&pool));assert(unmaps==1&&frees==1);
++ assert(xp_pp_teardown(&pool)&&unmaps==1&&frees==1);
++ /* Independent page-pool destroy callbacks allow completion without a
++    last-socket callback waiting for its own extra reference to be dropped. */
++ provider=(struct xsk_pp){.nr_pools=1,.detached=true};
++ pool.pp=&provider;pool.dma_map=&map;map.netdev=(void *)1;
++ xp_pp_force_dma_unmap(&pool);
++ assert(unmaps==2&&!map.netdev&&provider.nr_pools==1);
++ assert(!xp_pp_teardown(&pool)); /* forced unregister doesn't wait for ownership */
++ xp_pp_destroy(&first);assert(xp_pp_teardown(&pool)&&frees==2);
++ return 0;
++}
++'''
++with tempfile.TemporaryDirectory() as tmp:
++ c=Path(tmp)/'provider.c';exe=Path(tmp)/'provider';c.write_text(code)
++ subprocess.run(['gcc','-std=c17','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-fno-omit-frame-pointer',str(c),'-o',str(exe)],check=True)
++ subprocess.run([str(exe)],check=True)
++print('PASS RFC09: two-pool deferred ownership, stalled retention/backoff, independent destroy, exact-once mock cleanup, forced unmap before drain, 2KiB/alignment rejection. No concurrency/DMA proof.')
+--- /dev/null
++++ b/tests/test_recovery_primitives.py
+@@ -0,0 +1,78 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++"""Compile pristine vendor functions with fault injection; no hardware claims."""
++from pathlib import Path
++import subprocess, tempfile
++root = Path(__file__).resolve().parents[2]
++source = (root/'bnxt_en-1.10.3-239.1.170.0/bnxt.c').read_text()
++def function(signature):
++    start = source.index(signature)
++    return source[start:source.index('\n}\n', start)+3]
++code = r'''
++#include <assert.h>
++#include <stdbool.h>
++#include <stdint.h>
++typedef uint32_t u32;
++#define INVALID_HW_RING_ID 65535U
++#define RING_FREE_REQ_RING_TYPE_RX 2
++#define HWRM_FUNC_RESET 17
++#define HWRM_RESET_TIMEOUT 9000
++struct bnxt_ring_struct { u32 fw_ring_id; };
++struct bnapi { u32 index; };
++struct bnxt_rx_ring_info { struct bnxt_ring_struct rx_ring_struct; struct bnapi *bnapi; };
++struct group { u32 rx_fw_ring_id; };
++struct bnxt { struct group grp_info[1]; };
++struct hwrm_func_reset_input { unsigned enables; };
++static struct hwrm_func_reset_input request;
++static int init_rc,send_rc,sends,timeouts,frees,free_rc;
++static u32 observed_cmpl;
++static int init(struct bnxt *bp,struct hwrm_func_reset_input **req,int type) {
++ (void)bp;assert(type==HWRM_FUNC_RESET);*req=&request;request.enables=42;return init_rc;
++}
++#define hwrm_req_init(bp,req,type) init(bp,&req,type)
++static void hwrm_req_timeout(struct bnxt *bp,struct hwrm_func_reset_input *req,int timeout) {
++ (void)bp;assert(req==&request&&timeout==HWRM_RESET_TIMEOUT);timeouts++;
++}
++static int hwrm_req_send(struct bnxt *bp,struct hwrm_func_reset_input *req) {
++ (void)bp;assert(req==&request&&req->enables==0);sends++;return send_rc;
++}
++static u32 bnxt_cp_ring_for_rx(struct bnxt *bp,struct bnxt_rx_ring_info *rxr) {
++ (void)bp;(void)rxr;return 23;
++}
++static int hwrm_ring_free_send_msg(struct bnxt *bp,struct bnxt_ring_struct *ring,int type,u32 cmpl) {
++ (void)bp;assert(ring->fw_ring_id==7&&type==RING_FREE_REQ_RING_TYPE_RX);
++ frees++;observed_cmpl=cmpl;return free_rc;
++}
++'''
++code += function('static int bnxt_hwrm_func_reset(')
++code += function('void bnxt_hwrm_rx_ring_free(')
++code += r'''
++int main(void) {
++ struct bnxt bp={0};
++ init_rc=-12;assert(bnxt_hwrm_func_reset(&bp)==-12);assert(!sends&&!timeouts);
++ init_rc=0;
++ int results[]={0,-5,-110,-19};
++ for(unsigned i=0;i<sizeof(results)/sizeof(results[0]);i++) {
++  send_rc=results[i];assert(bnxt_hwrm_func_reset(&bp)==send_rc);
++ }
++ assert(sends==4&&timeouts==4);
++ struct bnapi napi={0};
++ for(unsigned i=0;i<sizeof(results)/sizeof(results[0]);i++) {
++  struct bnxt_rx_ring_info rx={.rx_ring_struct={7},.bnapi=&napi};
++  bp.grp_info[0].rx_fw_ring_id=7;free_rc=results[i];
++  bnxt_hwrm_rx_ring_free(&bp,&rx,true);
++  assert(observed_cmpl==23);
++  assert(rx.rx_ring_struct.fw_ring_id==INVALID_HW_RING_ID);
++  assert(bp.grp_info[0].rx_fw_ring_id==INVALID_HW_RING_ID);
++  int before=frees;bnxt_hwrm_rx_ring_free(&bp,&rx,true);assert(frees==before);
++ }
++ struct bnxt_rx_ring_info rx={.rx_ring_struct={7},.bnapi=&napi};
++ bnxt_hwrm_rx_ring_free(&bp,&rx,false);assert(observed_cmpl==INVALID_HW_RING_ID);
++ return 0;
++}
++'''
++with tempfile.TemporaryDirectory() as tmp:
++    c=Path(tmp)/'recovery.c';exe=Path(tmp)/'recovery';c.write_text(code)
++    subprocess.run(['gcc','-std=c17','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-fno-omit-frame-pointer',str(c),'-o',str(exe)],check=True)
++    subprocess.run([str(exe)],check=True)
++print('PASS: pristine239 reset propagates init/send failures; RX free invalidates IDs despite failure; completion selection verified. Mocked transport, no DMA proof.')
+--- /dev/null
++++ b/tests/test_xsk_completion.py
+@@ -0,0 +1,72 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++from pathlib import Path
++import subprocess,tempfile
++root=Path(__file__).resolve().parents[1]
++s=(root/'bnxt_xdp.c').read_text();a=s.index('static void __bnxt_tx_int_xdp(');fn=s[a:s.index('\n}\n',a)+3]
++code=r'''
++#include <assert.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stddef.h>
++typedef uint16_t u16;
++#define HAVE_XSK_SUPPORT 1
++#define HAVE_XDP_FRAME 1
++#define CONFIG_PAGE_POOL 1
++#define XDP_REDIRECT 4
++#define XDP_TX 3
++#define BNXT_XSK_TX 7
++#define DMA_TO_DEVICE 1
++#define RING_TX(bp,n) ((n)&(bp)->mask)
++#define NEXT_TX(n) ((u16)((n)+1))
++#define WRITE_ONCE(a,b) ((a)=(b))
++#define netdev_dbg(...) ((void)0)
++#define dma_unmap_addr(b,n) ((b)->n)
++#define dma_unmap_len(b,n) ((b)->n)
++struct xsk_buff_pool {int n;};struct pci_dev{int dev;};
++struct bnxt {unsigned mask;struct pci_dev *pdev;};
++struct bnxt_sw_tx_bd {unsigned action,nr_frags,rx_prod;void *xdpf,*page;unsigned mapping,len;};
++struct bnxt_rx_ring_info {void *page_pool;unsigned rx_prod;int rx_db;};
++struct stats {struct {unsigned xsk_tx_completed;} xsk_stats;};
++struct bnxt_napi {struct bnxt_rx_ring_info *rx_ring;struct{struct stats *sw_stats;}cp_ring;};
++struct bnxt_tx_ring_info {struct bnxt_napi *bnapi;u16 tx_hw_cons,tx_cons;struct bnxt_sw_tx_bd *tx_buf_ring;unsigned xdp_tx_pending;struct xsk_buff_pool *xsk_pool;};
++static unsigned unmaps,returns,recycles,completions,doorbells,last_db,resets;
++static void dma_unmap_single(int *dev,unsigned m,unsigned n,int d){(void)dev;(void)m;(void)n;assert(d==1);unmaps++;}
++static void xdp_return_frame(void *p){assert(p);returns++;}
++static void page_pool_recycle_direct(void *pool,void *p){(void)pool;assert(p);recycles++;}
++static void bnxt_sched_reset_txr(struct bnxt *bp,struct bnxt_tx_ring_info *txr,u16 n){(void)bp;(void)txr;(void)n;resets++;}
++static void xsk_tx_completed(struct xsk_buff_pool *p,unsigned n){assert(p);completions+=n;}
++static bool xsk_uses_need_wakeup(struct xsk_buff_pool *p){(void)p;return false;}
++static void xsk_set_tx_need_wakeup(struct xsk_buff_pool *p){(void)p;}
++static void bnxt_db_write(struct bnxt *bp,int *db,unsigned prod){(void)bp;(void)db;doorbells++;last_db=prod;}
++'''+fn+r'''
++int main(void){
++ struct pci_dev pci={0};struct bnxt bp={7,&pci};struct xsk_buff_pool pool={0};
++ struct stats stats={0};struct bnxt_rx_ring_info rx={.rx_prod=99};
++ struct bnxt_napi napi={.rx_ring=&rx,.cp_ring={&stats}};
++ struct bnxt_sw_tx_bd entries[8]={{0}};
++ struct bnxt_tx_ring_info tx={.bnapi=&napi,.tx_hw_cons=0,.tx_cons=65534,.tx_buf_ring=entries,.xdp_tx_pending=1,.xsk_pool=&pool};
++ entries[6].action=XDP_TX;entries[7].action=BNXT_XSK_TX;
++ __bnxt_tx_int_xdp(&bp,&tx);
++ assert(tx.tx_cons==0&&!tx.xdp_tx_pending&&!entries[6].action&&!entries[7].action);
++ assert(completions==1&&stats.xsk_stats.xsk_tx_completed==1&&doorbells==1&&last_db==99&&!resets);
++ __bnxt_tx_int_xdp(&bp,&tx);assert(completions==1&&doorbells==1);
++ /* The independent redirect ring releases its own DMA map/frame exactly once. */
++ struct bnxt_sw_tx_bd redirects[8]={{0}};redirects[0].action=XDP_REDIRECT;redirects[0].xdpf=(void*)1;
++ struct bnxt_tx_ring_info rdir={.bnapi=&napi,.tx_hw_cons=1,.tx_buf_ring=redirects};
++ __bnxt_tx_int_xdp(&bp,&rdir);assert(unmaps==1&&returns==1&&!redirects[0].action&&!redirects[0].xdpf&&completions==1);
++ __bnxt_tx_int_xdp(&bp,&rdir);assert(unmaps==1&&returns==1);
++ /* Reused raw-XSK slot reports a new completion, never a stale one. */
++ entries[0].action=BNXT_XSK_TX;tx.tx_hw_cons=1;
++ __bnxt_tx_int_xdp(&bp,&tx);assert(completions==2&&!entries[0].action&&!recycles);
++ /* Invalid later entry must not lose the already-processed raw prefix. */
++ entries[1].action=BNXT_XSK_TX;entries[2].action=99;tx.tx_hw_cons=3;
++ __bnxt_tx_int_xdp(&bp,&tx);assert(completions==3&&tx.tx_cons==2&&resets==1&&!entries[1].action);
++ return 0;
++}
++'''
++with tempfile.TemporaryDirectory() as tmp:
++ c=Path(tmp)/'completion.c';exe=Path(tmp)/'completion';c.write_text(code)
++ subprocess.run(['gcc','-std=c17','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-fno-omit-frame-pointer',str(c),'-o',str(exe)],check=True)
++ subprocess.run([str(exe)],check=True)
++print('PASS actual TX completion: mixed RX-backed/raw-XSK preserves RX doorbell, separate redirect unmap/frame return, wrap/reuse/repeat accounting. Mock hardware.')

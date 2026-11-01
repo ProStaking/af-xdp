@@ -1,0 +1,210 @@
+diff --git a/config/extra/with-p4-prebind.mk b/config/extra/with-p4-prebind.mk
+new file mode 100644
+index 0000000..6b28ee1
+--- /dev/null
++++ b/config/extra/with-p4-prebind.mk
+@@ -0,0 +1,2 @@
++# Experimental lab-only userspace initialization; no driver changes.
++CPPFLAGS+=-DFD_XSK_EXPERIMENTAL_P4_PREBIND=1
+diff --git a/src/disco/net/xdp/fd_xdp_tile.c b/src/disco/net/xdp/fd_xdp_tile.c
+index 4c1482a..f08ae22 100644
+--- a/src/disco/net/xdp/fd_xdp_tile.c
++++ b/src/disco/net/xdp/fd_xdp_tile.c
+@@ -25,6 +25,7 @@
+ #include "../../../waltz/mib/fd_netdev_tbl.h"
+ #include "../../../waltz/xdp/fd_xdp_redirect_user.h" /* fd_xsk_activate */
+ #include "../../../waltz/xdp/fd_xsk.h"
++#include "../../../waltz/xdp/fd_xsk_prebind.h"
+ #include "../../../util/log/fd_dtrace.h"
+ #include "../../../util/net/fd_eth.h"
+ #include "../../../util/net/fd_ip4.h"
+@@ -202,6 +203,9 @@ typedef struct {
+   /* UMEM frame region within dcache */
+   void *   umem;    /* Start of UMEM */
+   ulong    umem_sz; /* Size  of UMEM */
++#ifdef FD_XSK_EXPERIMENTAL_P4_PREBIND
++  fd_xsk_prebind_layout_t prebind;
++#endif
+ 
+   /* Details pertaining to an inflight send op */
+   struct {
+@@ -1128,6 +1132,8 @@ privileged_init( fd_topo_t const *      topo,
+   ulong  const umem_frame_sz       = 2048UL;
+   ulong  const umem_sz             = fd_ulong_align_dn( umem_dcache_data_sz, umem_frame_sz );
+ 
++  if( FD_UNLIKELY( umem_sz<umem_frame_sz ) ) FD_LOG_ERR(( "UMEM is too small" ));
++
+   /* Derive chunk bounds */
+ 
+   void * const umem_base   = fd_wksp_containing( dcache_mem );
+@@ -1181,6 +1187,27 @@ privileged_init( fd_topo_t const *      topo,
+ 
+   fd_cstr_ncpy( params0.poll_mode, tile->xdp.poll_mode, sizeof(params0.poll_mode) );
+ 
++#ifdef FD_XSK_EXPERIMENTAL_P4_PREBIND
++  /* Deliberately narrow lab build: one physical pool, explicit queue/mode,
++     standalone interface. No auto-enablement for other deployments. */
++  if( FD_UNLIKELY( tile->xdp.zero_copy!=1 || tile->kind_id ||
++      fd_topo_tile_name_cnt( topo, tile->name )!=1UL || tile->xdp.if_queue!=0U ||
++      strcmp( tile->xdp.if_virt, tile->xdp.if_phys ) || !strcmp( tile->xdp.if_phys, "lo" ) ||
++      tile->xdp.xdp_rx_queue_size!=1024UL ) )
++    FD_LOG_ERR(( "experimental P4 prebind build requires one standalone zero-copy queue0, RX1024" ));
++  ulong cache_cnt = 0UL;
++  for( ulong i=0UL; i<tile->out_cnt; i++ ) {
++    ulong depth = topo->links[ tile->out_link_id[i] ].depth;
++    if( FD_UNLIKELY( depth>umem_sz/2048UL-cache_cnt ) ) FD_LOG_ERR(( "RX cache exceeds UMEM" ));
++    cache_cnt += depth;
++  }
++  if( FD_UNLIKELY( fd_xsk_prebind_layout( &ctx->prebind, umem_sz, umem_frame_sz,
++      tile->xdp.free_ring_depth, cache_cnt, 1024UL, 1024UL ) ) )
++    FD_LOG_ERR(( "invalid experimental prebind UMEM partition" ));
++  params0.initial_fill_off = ctx->prebind.phys_off;
++  params0.initial_fill_cnt = ctx->prebind.phys_cnt;
++#endif
++
+   /* Re-derive XDP file descriptors */
+ 
+   fd_xdp_fds_t xdp_fds[ FD_TOPO_XDP_FDS_MAX ];
+@@ -1227,6 +1254,11 @@ privileged_init( fd_topo_t const *      topo,
+     params1.if_idx      = lo_idx; /* probably always 1 */
+     params1.if_queue_id = 0;
+     params1.bind_flags  = 0;
++#ifdef FD_XSK_EXPERIMENTAL_P4_PREBIND
++    params1.bind_flags       = XDP_COPY;
++    params1.initial_fill_off = 0UL;
++    params1.initial_fill_cnt = 0UL;
++#endif
+     if( FD_UNLIKELY( !fd_xsk_init( &ctx->xsk[ 1 ], &params1 ) ) )          FD_LOG_ERR(( "failed to bind lo_xsk" ));
+     if( FD_UNLIKELY( !fd_xsk_activate( &ctx->xsk[ 1 ], lo_xsk_map_fd ) ) ) FD_LOG_ERR(( "failed to activate lo_xsk" ));
+   }
+@@ -1372,17 +1404,36 @@ unprivileged_init( fd_topo_t const *      topo,
+   for( ulong i=0UL; i<(tile->out_cnt); i++ ) {
+     fd_topo_link_t const * out_link = &topo->links[ tile->out_link_id[ i  ] ];
+     fd_frag_meta_t * mcache = out_link->mcache;
++#ifdef FD_XSK_EXPERIMENTAL_P4_PREBIND
++    FD_TEST( fd_mcache_depth( mcache )==out_link->depth );
++#endif
+     for( ulong j=0UL; j<fd_mcache_depth( mcache ); j++ ) {
+       mcache[ j ].chunk = (uint)( ctx->net.pkt_buf_chunk0 + (frame_off>>FD_CHUNK_LG_SZ) );
+       frame_off += frame_sz;
+     }
+   }
+ 
++#ifdef FD_XSK_EXPERIMENTAL_P4_PREBIND
++  FD_TEST( frame_off==ctx->prebind.phys_off && ctx->xsk_cnt==2U );
++#endif
++
+   /* Initialize FILL ring */
+ 
+   int _charge_busy = 0;
+   for( uint j=0U; j<ctx->xsk_cnt; j++ ) {
++#ifdef FD_XSK_EXPERIMENTAL_P4_PREBIND
++    if( j==0U ) {
++      /* Hardware may already have consumed entries. Never reset/read back
++         initial producer values or republish these physical frames. */
++      frame_off = ctx->prebind.loop_off;
++    } else {
++      FD_TEST( frame_off==ctx->prebind.loop_off );
++      frame_off = net_xsk_bootstrap( ctx, j, frame_off );
++      FD_TEST( frame_off==ctx->prebind.end_off );
++    }
++#else
+     frame_off = net_xsk_bootstrap( ctx, j, frame_off );
++#endif
+     net_rx_wakeup( ctx, &ctx->xsk[ j ], &_charge_busy );
+     net_tx_wakeup( ctx, &ctx->xsk[ j ], &_charge_busy );
+   }
+diff --git a/src/waltz/xdp/fd_xsk.c b/src/waltz/xdp/fd_xsk.c
+index 144e295..96c151f 100644
+--- a/src/waltz/xdp/fd_xsk.c
++++ b/src/waltz/xdp/fd_xsk.c
+@@ -16,6 +16,7 @@
+ 
+ #include "../../util/log/fd_log.h"
+ #include "fd_xsk.h"
++#include "fd_xsk_prebind.h"
+ 
+ /* Support for older kernels */
+ 
+@@ -283,6 +284,15 @@ fd_xsk_init( fd_xsk_t *              xsk,
+     return NULL;
+   }
+ 
++  if( FD_UNLIKELY( params->initial_fill_cnt &&
++      (params->bind_flags!=XDP_ZEROCOPY || params->frame_sz!=2048UL ||
++       params->initial_fill_cnt>params->fr_depth ||
++       params->initial_fill_off%2048UL || params->initial_fill_off>params->umem_sz ||
++       params->initial_fill_cnt>(params->umem_sz-params->initial_fill_off)/2048UL) ) ) {
++    FD_LOG_WARNING(( "invalid initial FILL span or zero-copy mode" ));
++    return NULL;
++  }
++
+   xsk->if_idx      = params->if_idx;
+   xsk->if_queue_id = params->if_queue_id;
+ 
+@@ -305,6 +315,14 @@ fd_xsk_init( fd_xsk_t *              xsk,
+   if( FD_UNLIKELY( 0!=fd_xsk_mmap_ring( &xsk->ring_fr, xsk->xsk_fd, XDP_UMEM_PGOFF_FILL_RING,       sizeof(ulong),           params->fr_depth, &xsk->offsets.fr ) ) ) goto fail;
+   if( FD_UNLIKELY( 0!=fd_xsk_mmap_ring( &xsk->ring_cr, xsk->xsk_fd, XDP_UMEM_PGOFF_COMPLETION_RING, sizeof(ulong),           params->cr_depth, &xsk->offsets.cr ) ) ) goto fail;
+ 
++  /* Only a fresh, still-unbound socket can publish this reserved span. */
++  if( params->initial_fill_cnt ) {
++    fd_xdp_ring_t * fill = &xsk->ring_fr;
++    if( FD_UNLIKELY( fd_xsk_prebind_publish( fill->frame_ring, fill->prod, fill->cons,
++        &fill->cached_prod, &fill->cached_cons, fill->depth,
++        params->initial_fill_off, params->initial_fill_cnt, params->umem_sz ) ) ) goto fail;
++  }
++
+   /* Bind XSK to queue on network interface */
+ 
+   uint flags = XDP_USE_NEED_WAKEUP | params->bind_flags;
+@@ -327,6 +345,18 @@ fd_xsk_init( fd_xsk_t *              xsk,
+     goto fail;
+   }
+ 
++  if( params->initial_fill_cnt ) {
++    struct xdp_options options = {0};
++    socklen_t options_sz = sizeof(options);
++    if( FD_UNLIKELY( getsockopt( xsk->xsk_fd, SOL_XDP, XDP_OPTIONS, &options, &options_sz ) ||
++        options_sz!=sizeof(options) || !(options.flags & XDP_OPTIONS_ZEROCOPY) ) ) {
++      FD_LOG_WARNING(( "initial FILL path did not confirm runtime XDP zero-copy" ));
++      goto fail;
++    }
++    FD_LOG_NOTICE(( "pre-bind FILL: off=%lu count=%lu; runtime XDP zero-copy confirmed",
++                   params->initial_fill_off, params->initial_fill_cnt ));
++  }
++
+   /* We've seen that some popular Intel NICs seem to have a bug that
+      prevents them from working in SKB mode with certain kernel
+      versions.  We can identify them by sendto returning ENXIO or EINVAL
+diff --git a/src/waltz/xdp/fd_xsk.h b/src/waltz/xdp/fd_xsk.h
+index feb7536..8822487 100644
+--- a/src/waltz/xdp/fd_xsk.h
++++ b/src/waltz/xdp/fd_xsk.h
+@@ -217,6 +217,11 @@ struct fd_xsk_params {
+   /* sockaddr_xdp.sxdp_flags additional params, e.g. XDP_ZEROCOPY */
+   uint bind_flags;
+ 
++  /* Optional fresh FILL span published before bind. Zero count preserves
++     the normal path. Nonzero requires explicit zero-copy and 2048B frames. */
++  ulong initial_fill_off;
++  ulong initial_fill_cnt;
++
+   /* Whether to use softirqs to poll napi or prefbusy poll */
+   char poll_mode[ 16 ];
+ 
+diff --git a/src/waltz/xdp/fd_xsk_prebind.h b/src/waltz/xdp/fd_xsk_prebind.h
+index 3811833..b81d003 100644
+--- a/src/waltz/xdp/fd_xsk_prebind.h
++++ b/src/waltz/xdp/fd_xsk_prebind.h
+@@ -1,9 +1,8 @@
+ #ifndef HEADER_fd_src_waltz_xdp_fd_xsk_prebind_h
+ #define HEADER_fd_src_waltz_xdp_fd_xsk_prebind_h
+ 
+-/* Offline integration primitives.  No syscalls or ownership transfer.
+-   The production XSK initializer does not enable this path until its
+-   process/descriptor lifetime has been separately qualified. */
++/* Pure layout and fresh-ring publication primitives. The experimental
++   opt-in initializer transfers the published physical span before bind. */
+ #include <limits.h>
+ 
+ struct fd_xsk_prebind_layout {

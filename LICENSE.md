@@ -13,3 +13,7 @@ This license map takes precedence over a broad interpretation of file extensions
 ## Inherited measured service excerpts
 
 The base service and preparation-unit excerpts in `x710/configs/measured-service.service.example` and `x710/docs/MEASURED-CONFIG-AND-SERVICE.md` record existing deployed configuration. Pre-session base-unit authorship is not established. They are not asserted to be independently designed or exclusively owned by ProStaking, and no new license grant is asserted over any inherited third-party expression. Our new prose, sanitization and measured resource drop-in remain distinguishable original contributions. Facts, option names and vendor marks are not claimed as exclusive property.
+
+## Broadcom P4 additions
+
+The `bnxt-p4/` package has a component-specific [license map](bnxt-p4/LICENSE-MAP.md). Driver derivative patch/test material retains GPL terms; Firedancer derivative patch/test material retains Apache-2.0 and its notices. Original package scripts/configuration use MIT and original documentation/data use CC BY 4.0. Repository defaults do not override upstream licenses.

@@ -1,0 +1,11 @@
+{
+  "requests": 32,
+  "exact_replies": 32,
+  "submissions": 32,
+  "completions": 32,
+  "tx_buffers": 8,
+  "safe_reuses": 24,
+  "default_forced_zc_errno": 95,
+  "stock_restored": true,
+  "scope": "bounded canary TX, not performance"
+}

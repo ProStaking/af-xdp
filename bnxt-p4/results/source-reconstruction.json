@@ -1,0 +1,17 @@
+{
+  "driver": {
+    "base": "Broadcom bnxt_en-1.10.3-239.1.170.0 pristine extracted source",
+    "final_files_verified": 306,
+    "matches_tested_source": true
+  },
+  "firedancer": {
+    "base_local_import": "9bcbd17b0a0de118e82c0c3b96c55e8b78c94d53",
+    "declared_upstream": "6286f99e400c1d5ac6f95b8cf36491555faa3726",
+    "final_files_verified": 3645,
+    "matches_local_tested_source": true,
+    "fresh_upstream_download_replay": true,
+    "official_archive_sha256": "d53804b298cbd19f328ca69e1ee081c207a0d43926d7e207c11a9837a4eb401f",
+    "all_final_files_match": true
+  },
+  "scope": "patch application and byte hashes only; no builds or host execution in packaging verification"
+}

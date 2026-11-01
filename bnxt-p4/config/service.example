@@ -1,0 +1,27 @@
+# Documentary measured template. Site gate/final_exec helpers are prerequisites, NOT supplied executables.
+[Unit]
+Description=Bounded unstaked P4 Firedancer qualification
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/SITE/trial/start-authorized
+ConditionPathExists=/SITE/fence/source-stopped
+ConditionPathExists=!/SITE/fence/source-start-authorized
+OnFailure=
+OnSuccess=
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/python3 -B /SITE/trial/start_gate.py /SITE/trial
+ExecStartPre=/SITE/trial/firedancer-p4-prebind configure check all --config /SITE/trial/p4-unstaked.toml
+ExecStart=/usr/bin/python3 -B /SITE/trial/final_exec.py /SITE/trial
+Restart=no
+RuntimeMaxSec=@RUNTIME_MAX@
+KillMode=control-group
+KillSignal=SIGTERM
+SendSIGKILL=no
+TimeoutStopSec=120
+LimitNOFILE=1048576
+LimitMEMLOCK=96G
+MemoryMax=104G
+InaccessiblePaths=/SITE/private-voting-keys
+StandardOutput=journal
+StandardError=journal

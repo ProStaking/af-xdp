@@ -1,0 +1,38 @@
+{
+  "cycles": [
+    {
+      "cycle": 1,
+      "sent": 90,
+      "validated_rx": 90,
+      "frame_reuses": 0,
+      "rx_wraps": 0,
+      "steering_checks": 3,
+      "completed_utc": "2026-11-01T01:53:23.436357+00:00",
+      "normal_cleanup": true
+    },
+    {
+      "cycle": 2,
+      "sent": 2048,
+      "validated_rx": 2048,
+      "frame_reuses": 1026,
+      "rx_wraps": 4,
+      "steering_checks": 3,
+      "completed_utc": "2026-11-01T02:07:53.182306+00:00",
+      "normal_cleanup": true
+    },
+    {
+      "cycle": 3,
+      "sent": 90,
+      "validated_rx": 90,
+      "frame_reuses": 0,
+      "rx_wraps": 0,
+      "steering_checks": 3,
+      "completed_utc": "2026-11-01T02:08:34.436261+00:00",
+      "normal_cleanup": true
+    }
+  ],
+  "total_sent": 2228,
+  "total_validated_rx": 2228,
+  "stock_restored": true,
+  "scope": "RX only"
+}

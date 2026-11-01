@@ -6,7 +6,9 @@ Operator-facing configurations, measurement data and runbooks for bounded AF_XDP
 
 - [Intel X710](x710/README.md): Firedancer 26.10.5 on the documented testnet configuration; final TOML/resource settings, scoped backend swap and rollback, sanitized measurements and optional helpers.
 
-No other hardware experiment is included yet. Results from one configuration do not establish support or performance on another device, client release or cluster.
+- [Broadcom BCM57416 P4](bnxt-p4/README.md): experimental driver and Firedancer initialization patches, verified source reconstruction, manual reproduction steps and bounded unstaked replay evidence. It did not establish cluster catch-up or voting readiness.
+
+Results from one configuration do not establish support or performance on another device, client release or cluster.
 
 ## Read before running
 
@@ -16,4 +18,4 @@ The human article explains the result; the experiment package provides exact set
 
 ## Licenses and provenance
 
-Original code/configuration examples use MIT; original prose/data/figures use CC BY 4.0. See [the license map](LICENSE.md) and [provenance](PROVENANCE.md). Upstream Firedancer/driver source and binaries are not vendored. No private consensus history, keys or management endpoints are included.
+Original code/configuration examples use MIT; original prose/data/figures use CC BY 4.0. See [the license map](LICENSE.md) and [provenance](PROVENANCE.md). The X710 package contains no upstream source or binaries. The bnxt-p4 package contains separately licensed driver and Firedancer patch material and required notices; it contains no binaries, firmware or vendor installer. No private consensus history, keys or management endpoints are included.

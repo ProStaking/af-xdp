@@ -1,0 +1,65 @@
+# Reference as-run values, with /SITE paths, interface and documentation IP placeholders.
+# Historical consensus checkpoint/shred values must match your current cluster; do not blindly reuse.
+name = "p4-unstaked"
+user = "sol"
+telemetry = false
+[paths]
+base = "/SITE/data"
+identity_key = "/SITE/keys/unstaked-identity.json"
+vote_account = ""
+authorized_voter_paths = []
+accounts = "/SITE/data/accounts.db"
+shredb = "/SITE/data/shreds.db"
+snapshots = "/SITE/data/snapshots"
+vote_history = "/SITE/data/vote-history"
+[log]
+path = "/SITE/data/firedancer.log"
+[gossip]
+entrypoints = ["entrypoint.testnet.solana.com:8001", "entrypoint2.testnet.solana.com:8001"]
+host = "192.0.2.10"
+[consensus]
+expected_shred_version = 52352
+wait_for_supermajority_at_slot = 457066979
+wait_for_supermajority_with_bank_hash = "Dq36Y8g1hrsRNCGJjTGhrBUoF8x7o1QuFYLFQPQy6W1e"
+wait_for_vote_to_start_leader = "auto"
+expected_genesis_hash = "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY"
+alpenglow = true
+[accounts]
+max_accounts = 200_000_000
+cache_size_gib = 12
+[snapshots.sources]
+servers = []
+[snapshots.sources.gossip]
+allow_any = false
+[layout]
+mode = "performance"
+affinity = "auto"
+blocklist_cores = "0h"
+shred_tile_count = 4
+net_tile_count = 1
+enable_block_production = false
+enable_snapshot_production = false
+[hugetlbfs]
+mount_path = "/SITE/hugetlbfs"
+max_page_size = "gigantic"
+[net]
+provider = "xdp"
+interface = "SITE_P4_INTERFACE"
+[net.xdp]
+xdp_mode = "drv"
+xdp_zero_copy = "true"
+poll_mode = "softirq"
+rss_queue_mode = "dedicated"
+native_bond = "false"
+listen_gre = "false"
+xdp_rx_queue_size = 1024
+xdp_tx_queue_size = 1024
+[tiles.gui]
+enabled = false
+[tiles.rpc]
+enabled = true
+rpc_listen_address = "127.0.0.1"
+rpc_listen_port = 8899
+[tiles.metric]
+prometheus_listen_address = "127.0.0.1"
+prometheus_listen_port = 7999
