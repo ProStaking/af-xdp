@@ -1,0 +1,33 @@
+# Historical measured-hour configuration; see build/corrected-source.md for the later runtime option.
+# Documentary service, not portable activation automation.
+# All /SITE helpers and the prepare unit require operator-supplied reviewed equivalents.
+[Unit]
+Description=Persistent explicitly selected P4 testnet voting role
+Wants=network-online.target
+Requires=p4-voting-prepare.service
+After=network-online.target p4-voting-prepare.service
+ConditionPathExists=/SITE/role/active-role.json
+ConditionPathExists=!/SITE/role/fenced
+ConditionPathExists=/SITE/fence/previous-voter-stopped
+ConditionPathExists=!/SITE/fence/previous-voter-start-authorized
+OnFailure=
+OnSuccess=
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -B /SITE/helpers/start_gate.py
+ExecStopPost=/usr/bin/python3 -B /SITE/helpers/stop_checkpoint.py
+Restart=no
+KillMode=control-group
+KillSignal=SIGTERM
+SendSIGKILL=no
+TimeoutStopSec=120
+LimitNOFILE=1048576
+LimitMEMLOCK=104G
+MemoryMax=112G
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

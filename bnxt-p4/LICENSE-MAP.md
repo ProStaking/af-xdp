@@ -1,6 +1,6 @@
 # Component licenses and notices
 
-`driver/patches` modifies the GPL Broadcom bnxt_en component. Keep the vendor copyright/license notices, [GPLv2 text](LICENSES/GPL-2.0.txt), and modification records when reconstructing/distributing it. Driver tests extracted from or linked to that implementation remain with the GPL component. The first patch reconstructs the full research baseline, including test additions; the second reproduces the P4 candidate.
+`driver/patches` modifies the GPL Broadcom bnxt_en component. Keep the vendor copyright/license notices, [GPLv2 text](LICENSES/GPL-2.0.txt), and modification records when reconstructing/distributing it. Driver tests extracted from or linked to that implementation remain with the GPL component. The first patch reconstructs the full research baseline, including test additions; the second reproduces the historical P4 candidate; the third records the 1 November 2026 stable initial-fill correction and its regression tests.
 
 `firedancer/patches` and the Firedancer test fixture modify the Apache-2.0 Firedancer component. Preserve [LICENSE](LICENSES/Apache-2.0.txt), [NOTICE](NOTICE.firedancer), source attribution and modification notices. This package does not combine GPL driver implementation into Firedancer.
 
@@ -11,3 +11,5 @@ The destination repository’s approved terms apply to original package contribu
 This grant applies only to original material. The driver patch chain and source-derived driver tests retain GPL terms; Firedancer patches and its source-derived fixture retain Apache terms and attribution. License texts retain their own terms. Inherited measured configuration expression with unestablished authorship is not asserted to be exclusively owned or newly relicensed; original prose, sanitization and experimental configuration contributions remain distinguishable. File extension alone does not determine the license: original runnable Markdown snippets are MIT and surrounding prose is CC BY 4.0.
 
 The vendor installer/firmware bundle has separate acquisition terms and is not redistributed. Only obtain the identified source component through the official vendor channel. Source/patch delivery here avoids shipping kernel modules or Firedancer binaries; any later binary delivery needs its corresponding source and relevant notices, not only a reference to this experiment.
+
+The complete runtime-option patch is an alternative Apache-2.0 derivative against the same pristine Firedancer base, recorded 1 November 2026. Existing upstream NOTICE is retained byte-for-byte. It replaces, rather than extends, the historical two-patch sequence.

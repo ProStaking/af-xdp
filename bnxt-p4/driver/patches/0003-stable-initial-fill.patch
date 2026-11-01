@@ -1,0 +1,197 @@
+diff --git a/bnxt.c b/bnxt.c
+index 40eb169..5e81a68 100644
+--- a/bnxt.c
++++ b/bnxt.c
+@@ -6268,6 +6268,8 @@ static void bnxt_alloc_one_rx_ring_skb(struct bnxt *bp,
+ 	u32 prod;
+ 	int i;
+ 
++	/* Never retain a successful result across a later partial refill. */
++	rxr->xsk_rx_initial_fill_done = false;
+ 	prod = rxr->rx_prod;
+ 	for (i = 0; i < bp->rx_ring_size; i++) {
+ 		if (bnxt_alloc_rx_data(bp, rxr, prod, GFP_KERNEL)) {
+@@ -6278,6 +6280,11 @@ static void bnxt_alloc_one_rx_ring_skb(struct bnxt *bp,
+ 		prod = NEXT_RX(prod);
+ 	}
+ 	rxr->rx_prod = prod;
++	/* rx_prod can advance as soon as open enables packet processing.
++	 * Preserve the allocation result instead of testing that live counter.
++	 */
++	rxr->xsk_rx_initial_fill_done = rxr->xsk_pool &&
++		BNXT_RING_RX_ZC_MODE(rxr) && i == bp->rx_ring_size;
+ }
+ 
+ static void bnxt_alloc_one_rx_ring_netmem(struct bnxt *bp,
+diff --git a/bnxt.h b/bnxt.h
+index fcd88a1..bb141c3 100644
+--- a/bnxt.h
++++ b/bnxt.h
+@@ -1382,6 +1382,8 @@ struct bnxt_rx_ring_info {
+ 	struct page_pool	*head_pool;
+ #endif
+ 	struct xsk_buff_pool	*xsk_pool;
++	/* Written during RX allocation, before NAPI/interrupts are enabled. */
++	bool			xsk_rx_initial_fill_done;
+ 	u32                     flags;
+ #define BNXT_RING_FLAG_AF_XDP_ZC	0x00000001
+ #define BNXT_RING_RX_ZC_MODE(rxr)	((rxr)->flags & BNXT_RING_FLAG_AF_XDP_ZC)
+diff --git a/bnxt_xsk.c b/bnxt_xsk.c
+index 30a6ad7..3bac71a 100644
+--- a/bnxt_xsk.c
++++ b/bnxt_xsk.c
+@@ -203,7 +203,7 @@ static int bnxt_xdp_enable_pool(struct bnxt *bp, struct xsk_buff_pool *pool,
+ 	    bp->rx_ring[queue_id].xsk_pool != pool ||
+ 	    bp->tx_ring[queue_id].xsk_pool != pool ||
+ 	    !BNXT_RING_RX_ZC_MODE(&bp->rx_ring[queue_id]) ||
+-	    bp->rx_ring[queue_id].rx_prod != bp->rx_ring_size)) {
++	    !bp->rx_ring[queue_id].xsk_rx_initial_fill_done)) {
+ 		/* Initial fill can fail despite preflight (allocation/race).
+ 		 * Close while bitmap and mapping still identify the pool.
+ 		 */
+diff --git a/tests/test_initial_fill_race.py b/tests/test_initial_fill_race.py
+new file mode 100644
+index 0000000..c674ac1
+--- /dev/null
++++ b/tests/test_initial_fill_race.py
+@@ -0,0 +1,106 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++"""Extract real allocation/enable functions; mock hardware only. No device access."""
++from pathlib import Path
++import ast, subprocess, tempfile
++root=Path(__file__).resolve().parents[1]
++net=(root/'bnxt.c').read_text();xsk=(root/'bnxt_xsk.c').read_text()
++def extract(src,sig):
++ a=src.index(sig);return src[a:src.index('\n}\n',a)+3]
++# Reuse reviewed lifecycle API mocks, but replace the mocked allocation result
++# with the actual bnxt_alloc_one_rx_ring_skb implementation.
++tree=ast.parse((root/'tests/test_normal_lifecycle.py').read_text())
++pre=next(ast.literal_eval(n.value) for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='code' for t in n.targets))
++pre=pre.replace('unsigned fill=8,posted=8;static bool shrink;', 'unsigned fill=1024,posted=511;static bool shrink;')
++pre=pre.replace('static int bnxt_open_nic(', 'static int unused_old_open(')
++a=pre.index('static int unused_old_open(');b=pre.index('\n',a);pre=pre[:a]+pre[b:]
++pre=pre.replace('static void xsk_tx_completed(', 'static void __attribute__((unused)) xsk_tx_completed(')
++pre=pre.replace('static struct xsk_buff_pool *xsk_get_pool_from_qid(', 'static struct xsk_buff_pool *__attribute__((unused)) xsk_get_pool_from_qid(')
++# GCC unused-function exemptions apply only to the reused unused API fixtures.
++pre += r'''
++#define GFP_KERNEL 0
++#define NEXT_RX(n) ((u16)((n)+1))
++static void mock_warn(void *dev,const char *fmt,...){(void)dev;(void)fmt;}
++#define netdev_warn mock_warn
++static unsigned allocations, fail_after=511, advance;
++static int bnxt_alloc_rx_data(struct bnxt *bp,struct rx *r,unsigned p,int flags){
++ (void)bp;(void)r;(void)p;(void)flags;
++ if(allocations==fail_after)return -ENOMEM;
++ allocations++;return 0;
++}
++'''
++allocation=extract(net,'static void bnxt_alloc_one_rx_ring_skb(').replace('struct bnxt_rx_ring_info','struct rx')
++pre+=allocation
++pre+=r'''
++static int bnxt_open_nic(struct bnxt *bp,bool irq,bool link){
++ assert(irq&&!link&&closed);events[count++]=3;opening=true;
++ if(open_rc){live=false;bp->dev->running=false;opening=false;return open_rc;}
++ live=test_bit(0,bp->af_xdp_zc_qs);set_bit(BNXT_STATE_OPEN,&bp->state);
++ bp->rx_ring=rxrings;bp->tx_ring=txrings;bp->bnapi=(void*)1;
++ rxrings[0]=(struct rx){.xsk_pool=live?&pool:NULL,.rx_prod=0,.zc=live};
++ txrings[0].xsk_pool=live?&pool:NULL;
++ allocations=0;bnxt_alloc_one_rx_ring_skb(bp,&rxrings[0],0);
++ /* Models packets after open enabled NAPI, before caller validates. */
++ rxrings[0].rx_prod=(u16)(rxrings[0].rx_prod+advance);
++ opening=false;return 0;
++}
++'''
++main=r'''
++static void reset(struct bnxt *bp,struct netdev *dev,unsigned long *bits){
++ static struct pci pci;*bits=0;*dev=(struct netdev){true};
++ *bp=(struct bnxt){.dev=dev,.pdev=&pci,.xdp_prog=(void*)1,.rx_ring=(void*)1,.tx_ring=(void*)1,.bnapi=(void*)1,.state=1,.af_xdp_zc_qs=bits,.flags=1,.txbase=2,.rx_ring_size=511,.rx_nr_rings=2};
++ count=maps=unmaps=0;validate_rc=bounds_rc=map_rc=open_rc=0;
++ mapping=live=closed=opening=false;fill=1024;fail_after=511;advance=0;
++}
++int main(void){
++ struct bnxt bp;struct netdev dev;unsigned long bits;
++ /* Actual observed 525-vs-511 and counter wrap, not a >= approximation. */
++ unsigned advances[]={0,14,65025,65535};
++ for(unsigned j=0;j<4;j++){
++  reset(&bp,&dev,&bits);advance=advances[j];
++  int rc=bnxt_xdp_enable_pool(&bp,&pool,0);
++  if(OLD_PREDICATE && advance){assert(rc==-ENOBUFS&&!mapping&&!live&&!bits&&unmaps==1);}
++  else{assert(rc==0&&mapping&&live&&bits==1&&rxrings[0].xsk_rx_initial_fill_done);}
++ }
++ /* Every genuine short initial allocation still rejects; no false success. */
++ for(unsigned n=0;n<511;n++){
++  reset(&bp,&dev,&bits);fail_after=n;
++  assert(bnxt_xdp_enable_pool(&bp,&pool,0)==-ENOBUFS);
++  assert(!mapping&&!bits&&!live&&!dev.running&&unmaps==1);
++ }
++ reset(&bp,&dev,&bits);fill=510;assert(bnxt_xdp_enable_pool(&bp,&pool,0)==-ENOBUFS&&!maps);
++ reset(&bp,&dev,&bits);open_rc=-ENOMEM;assert(bnxt_xdp_enable_pool(&bp,&pool,0)==-ENOMEM&&!mapping&&!bits&&unmaps==1);
++ /* Real allocator clears a prior success before any new allocation. */
++ reset(&bp,&dev,&bits);struct rx r={.xsk_pool=&pool,.zc=true};
++ allocations=0;bnxt_alloc_one_rx_ring_skb(&bp,&r,0);assert(r.xsk_rx_initial_fill_done);
++ for(unsigned n=0;n<=3;n+=3){
++  allocations=0;fail_after=511;r.rx_prod=0;bnxt_alloc_one_rx_ring_skb(&bp,&r,0);assert(r.xsk_rx_initial_fill_done);
++  allocations=0;fail_after=n;r.rx_prod=0;bnxt_alloc_one_rx_ring_skb(&bp,&r,0);assert(!r.xsk_rx_initial_fill_done&&r.rx_prod==n);
++ }
++ /* A short fill cannot become success by advancing to the old expected value. */
++ if(!OLD_PREDICATE){reset(&bp,&dev,&bits);fail_after=497;advance=14;assert(bnxt_xdp_enable_pool(&bp,&pool,0)==-ENOBUFS&&!mapping&&!bits);}
++ /* Non-XSK and non-ZC rings never publish an XSK fill result. */
++ fail_after=511;allocations=0;r=(struct rx){.zc=true,.xsk_rx_initial_fill_done=true};bnxt_alloc_one_rx_ring_skb(&bp,&r,0);assert(!r.xsk_rx_initial_fill_done);
++ allocations=0;r=(struct rx){.xsk_pool=&pool,.xsk_rx_initial_fill_done=true};bnxt_alloc_one_rx_ring_skb(&bp,&r,0);assert(!r.xsk_rx_initial_fill_done);
++ return 0;
++}
++'''
++# Verify source ordering: allocator runs before chip/NAPI/interrupt publication.
++init=extract(net,'static int bnxt_init_nic(')
++assert init.index('bnxt_init_rx_rings')<init.index('bnxt_init_chip')
++a=net.index('rc = bnxt_init_nic(bp, irq_re_init);');b=net.index('bnxt_enable_int(bp);',a)
++assert 'bnxt_enable_napi(bp);' in net[a:b]
++assert 'return bnxt_alloc_one_rx_ring(bp, ring_nr);' in extract(net,'static int bnxt_init_one_rx_ring(')
++assert 'bnxt_alloc_one_rx_ring_skb(bp, rxr, ring_nr);' in extract(net,'static int bnxt_alloc_one_rx_ring(')
++func=extract(xsk,'static int bnxt_xdp_enable_pool(')
++assert '!bp->rx_ring[queue_id].xsk_rx_initial_fill_done' in func
++with tempfile.TemporaryDirectory() as d:
++ d=Path(d)
++ for old in [1,0]:
++  body=func.replace('!bp->rx_ring[queue_id].xsk_rx_initial_fill_done','bp->rx_ring[queue_id].rx_prod != bp->rx_ring_size') if old else func
++  for sanitize in [False,True]:
++   p=d/'test.c';p.write_text('#define OLD_PREDICATE '+str(old)+'\n'+pre+body+main)
++   exe=d/'test';args=['gcc','-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-Wno-sign-compare','-g','-O1',str(p),'-o',str(exe)]
++   if sanitize:args+=['-fsanitize=address,undefined','-fno-omit-frame-pointer','-no-pie']
++   subprocess.run(args,check=True);subprocess.run([str(exe)],check=True)
++   print('PASS', 'old-reproduction' if old else 'fixed-invariant', 'ASan+UBSan' if sanitize else 'normal',flush=True)
+diff --git a/tests/test_normal_lifecycle.py b/tests/test_normal_lifecycle.py
+index 7e102d6..049717a 100644
+--- a/tests/test_normal_lifecycle.py
++++ b/tests/test_normal_lifecycle.py
+@@ -33,7 +33,7 @@ struct device {int n;};struct pci {struct device dev;};
+ struct netdev {bool running;};struct xsk_buff_pool {int n;};
+ struct bnxt_sw_tx_bd {unsigned action;};
+ struct bnxt_tx_ring_info {u16 tx_cons,tx_prod;struct xsk_buff_pool *xsk_pool;struct bnxt_sw_tx_bd *tx_buf_ring;};
+-struct rx {struct xsk_buff_pool *xsk_pool;unsigned rx_prod;bool zc;};
++struct rx {struct xsk_buff_pool *xsk_pool;unsigned rx_prod;bool zc;bool xsk_rx_initial_fill_done;};
+ struct bnxt {struct netdev *dev;struct pci *pdev;void *xdp_prog,*bnapi;struct rx *rx_ring;struct bnxt_tx_ring_info *tx_ring;unsigned long state,*af_xdp_zc_qs;unsigned flags,txbase,rx_buf_use_size,mask,rx_ring_size,rx_nr_rings;};
+ static struct xsk_buff_pool pool;
+ static unsigned events[40],count,maps,unmaps,completions;
+@@ -54,7 +54,7 @@ static int xsk_pool_dma_map(struct xsk_buff_pool *p,struct device *d,int attrs){
+ static void xsk_pool_dma_unmap(struct xsk_buff_pool *p,int attrs){assert(p==&pool&&attrs==3&&mapping&&!live&&!opening);events[count++]=4;mapping=false;unmaps++;}
+ static struct xsk_buff_pool *xsk_get_pool_from_qid(struct netdev *d,u16 q){(void)d;(void)q;return &pool;}
+ static void bnxt_close_nic(struct bnxt *bp,bool irq,bool link){assert(irq&&!link);events[count++]=2;assert(!live||mapping);live=false;closed=true;clear_bit(BNXT_STATE_OPEN,&bp->state);bp->rx_ring=NULL;bp->tx_ring=NULL;bp->bnapi=NULL;}
+-static int bnxt_open_nic(struct bnxt *bp,bool irq,bool link){assert(irq&&!link&&closed);events[count++]=3;opening=true;assert(!test_bit(0,bp->af_xdp_zc_qs)||mapping);if(open_rc){live=false;bp->dev->running=false;}else{live=test_bit(0,bp->af_xdp_zc_qs);set_bit(BNXT_STATE_OPEN,&bp->state);bp->rx_ring=rxrings;bp->tx_ring=txrings;bp->bnapi=(void*)1;rxrings[0]=(struct rx){live?&pool:NULL,posted,live};txrings[0].xsk_pool=live?&pool:NULL;}if(shrink)bp->rx_nr_rings=bp->txbase=0;opening=false;return open_rc;}
++static int bnxt_open_nic(struct bnxt *bp,bool irq,bool link){assert(irq&&!link&&closed);events[count++]=3;opening=true;assert(!test_bit(0,bp->af_xdp_zc_qs)||mapping);if(open_rc){live=false;bp->dev->running=false;}else{live=test_bit(0,bp->af_xdp_zc_qs);set_bit(BNXT_STATE_OPEN,&bp->state);bp->rx_ring=rxrings;bp->tx_ring=txrings;bp->bnapi=(void*)1;rxrings[0]=(struct rx){live?&pool:NULL,posted,live,live && posted==bp->rx_ring_size};txrings[0].xsk_pool=live?&pool:NULL;}if(shrink)bp->rx_nr_rings=bp->txbase=0;opening=false;return open_rc;}
+ static void xsk_tx_completed(struct xsk_buff_pool *p,unsigned n){assert(p==&pool);completions+=n;}
+ '''
+ for sig in ['static int bnxt_xdp_enable_pool(', 'static int bnxt_xdp_disable_pool(', 'void bnxt_xsk_reclaim_tx(']:code+=extract(s,sig)
+diff --git a/tests/test_p4_lifecycle.py b/tests/test_p4_lifecycle.py
+index 659181b..113b988 100644
+--- a/tests/test_p4_lifecycle.py
++++ b/tests/test_p4_lifecycle.py
+@@ -141,6 +141,7 @@ struct bnxt_tx_ring_info {
+ 	struct xsk_buff_pool *xsk_pool; int txq_index; struct bnxt_db_info tx_db;
+ };
+ struct bnxt_rx_ring_info {
++ bool xsk_rx_initial_fill_done;
+ 	struct bnxt_napi *bnapi; u16 rx_prod, rx_agg_prod, rx_sw_agg_prod, rx_next_cons; u32 flags;
+ 	struct bnxt_sw_rx_bd *rx_buf_ring; struct rx_bd *rx_desc_ring[1]; void *page_pool, *head_pool;
+ 	struct bnxt_db_info rx_db, rx_agg_db; struct xsk_buff_pool *xsk_pool;

@@ -1,3 +1,7 @@
+# Historical voting plan, now followed by a completed trial
+
+The voting hour subsequently completed on2026-11-01; see [results](../results/voting-hour.md) and [voting runbook](voting-runbook.md). The plan below is retained as historical scope, not an instruction to perform another handover. P4 was left voting and X710 stopped with zero-copy preserved.
+
 # Conditional P4 voting/performance stage — not executed
 
 Conditional sequence: completed unstaked trial and stock restoration; documentation/package plus upstream assessment; then a separately coordinated single-voter handover and full one-hour whole-system/voting capture. If that hour passes, leave P4 as the voting node and use the existing voter as the IntelPR12540 lab. This is a plan, not evidence those later stages occurred.

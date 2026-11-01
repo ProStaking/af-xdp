@@ -1,0 +1,845 @@
+diff --git a/src/app/firedancer/config/default.toml b/src/app/firedancer/config/default.toml
+index 42efffd..fa6a862 100644
+--- a/src/app/firedancer/config/default.toml
++++ b/src/app/firedancer/config/default.toml
+@@ -1300,6 +1300,14 @@ telemetry = true
+         #  "true", "false" or "auto" (default)
+         xdp_zero_copy = "auto"
+ 
++        # Experimental: publish the physical socket's receive buffers to
++        # its FILL ring before binding.  Disabled unless explicitly set.
++        # Requires provider="xdp", xdp_mode="drv", xdp_zero_copy=true,
++        # native_bond=false, rss_queue_mode="dedicated",
++        # layout.net_tile_count=1, and xdp_rx_queue_size=1024.
++        # Use only with a driver and kernel validated for this ordering.
++        experimental_prebind_fill = false
++
+         # The poll_mode option determines how Firedancer polls NAPI (Linux's
+         # high perf networking mechanisms).  Its possible values are:
+         #
+diff --git a/src/app/shared/fd_auto_net.c b/src/app/shared/fd_auto_net.c
+index f022e7b..e320987 100644
+--- a/src/app/shared/fd_auto_net.c
++++ b/src/app/shared/fd_auto_net.c
+@@ -26,6 +26,7 @@ struct fd_auto_info {
+   char driver[ NAME_SZ ];
+   uint is_virtual_if:1;
+   uint is_bonded_if:1;
++  uint is_enslaved_if:1;
+   uint is_lacp_if:1;
+   uint bonded_if_slave_count;
+   int  is_using_gre;
+@@ -412,7 +413,8 @@ scrape_is_using_gre( void ) {
+ 
+ static void
+ scrape_networking( fd_auto_info_t * info,
+-                   char const     * if_name ) {
++                   char const     * if_name,
++                   int              check_prebind ) {
+   info->is_using_gre = scrape_is_using_gre();
+ 
+   /* Check for virtual interface */
+@@ -420,6 +422,17 @@ scrape_networking( fd_auto_info_t * info,
+   FD_TEST( fd_cstr_printf_check( path, PATH_MAX, NULL, "/sys/class/net/%s/device", if_name ) );
+   info->is_virtual_if = ( -1==access( path, F_OK ) );
+ 
++  /* A physical port may still belong to a bond or bridge.  Only probe
++     this for the experimental path, preserving default behavior. */
++  if( check_prebind ) {
++    FD_TEST( fd_cstr_printf_check( path, PATH_MAX, NULL, "/sys/class/net/%s/master", if_name ) );
++    int rc = access( path, F_OK );
++    if( FD_UNLIKELY( rc && errno!=ENOENT ) )
++      FD_LOG_ERR(( "net.xdp.experimental_prebind_fill cannot verify standalone interface %s: access(%s) failed (%i-%s)",
++                   if_name, path, errno, fd_io_strerror( errno ) ));
++    info->is_enslaved_if = !rc;
++  }
++
+   /* Check for bond */
+   info->is_bonded_if = !!fd_bonding_is_master( if_name );
+   if( info->is_bonded_if ) {
+@@ -442,7 +455,7 @@ fd_auto_scrape_info( fd_config_t const * config ) {
+   fd_auto_info_t info = {0};
+ 
+   scrape_system    ( &info                        );
+-  scrape_networking( &info, config->net.interface );
++  scrape_networking( &info, config->net.interface, config->net.xdp.experimental_prebind_fill );
+ 
+   if( !strcmp( config->net.provider, "auto" ) &&
+       info.has_mlx5_rdma_port                 &&
+@@ -459,6 +472,10 @@ but won't always maximally optimize, this is to reduce risk of failures. */
+ static void
+ fd_auto_net_apply( fd_config_t          * config,
+                    fd_auto_info_t const * info ) {
++  if( FD_UNLIKELY( config->net.xdp.experimental_prebind_fill &&
++                   (info->is_virtual_if || info->is_bonded_if || info->is_enslaved_if) ) )
++    FD_LOG_ERR(( "net.xdp.experimental_prebind_fill requires a standalone physical interface; net.interface=%s is virtual, a bond master, or attached to another interface", config->net.interface ));
++
+   /* Providers are in order of priority with first being the highest */
+   int const is_provider_auto = !strcmp( config->net.provider, "auto" );
+   int is_provider_set = 0;
+diff --git a/src/app/shared/fd_config.c b/src/app/shared/fd_config.c
+index e38bb3f..c3d688e 100644
+--- a/src/app/shared/fd_config.c
++++ b/src/app/shared/fd_config.c
+@@ -666,6 +666,23 @@ fd_config_validate( fd_config_t const * config ) {
+   if( FD_UNLIKELY( !config->is_firedancer && bench_shreds && bench_shreds!=32UL*FD_SHRED_BLK_MAX ) )
+     FD_LOG_ERR(( "invalid [development.bench.max_shreds_per_block]: Frankendancer supports 0 or %lu", 32UL*FD_SHRED_BLK_MAX ));
+ 
++  if( FD_UNLIKELY( config->net.xdp.experimental_prebind_fill ) ) {
++    if( FD_UNLIKELY( strcmp( config->net.provider, "xdp" ) ) )
++      FD_LOG_ERR(( "net.xdp.experimental_prebind_fill requires explicit net.provider=\"xdp\"" ));
++    if( FD_UNLIKELY( strcmp( config->net.xdp.xdp_mode, "drv" ) ) )
++      FD_LOG_ERR(( "net.xdp.experimental_prebind_fill requires explicit net.xdp.xdp_mode=\"drv\"" ));
++    if( FD_UNLIKELY( config->net.xdp.xdp_zero_copy!=FD_BOOLAU_TRUE ) )
++      FD_LOG_ERR(( "net.xdp.experimental_prebind_fill requires explicit net.xdp.xdp_zero_copy=true" ));
++    if( FD_UNLIKELY( config->net.xdp.native_bond!=FD_BOOLAU_FALSE ) )
++      FD_LOG_ERR(( "net.xdp.experimental_prebind_fill requires explicit net.xdp.native_bond=false and a standalone interface" ));
++    if( FD_UNLIKELY( strcmp( config->net.xdp.rss_queue_mode, "dedicated" ) ) )
++      FD_LOG_ERR(( "net.xdp.experimental_prebind_fill requires explicit net.xdp.rss_queue_mode=\"dedicated\"" ));
++    if( FD_UNLIKELY( config->layout.net_tile_count!=1U ) )
++      FD_LOG_ERR(( "net.xdp.experimental_prebind_fill requires layout.net_tile_count=1" ));
++    if( FD_UNLIKELY( config->net.xdp.xdp_rx_queue_size!=1024U ) )
++      FD_LOG_ERR(( "net.xdp.experimental_prebind_fill requires net.xdp.xdp_rx_queue_size=1024" ));
++  }
++
+   if( 0==strcmp( config->net.provider, "xdp" ) ) {
+     if( 0!=strcmp( config->net.xdp.xdp_mode, "skb"     ) &&
+         0!=strcmp( config->net.xdp.xdp_mode, "drv"     ) &&
+diff --git a/src/app/shared/fd_config.h b/src/app/shared/fd_config.h
+index 8dadfc3..94694d4 100644
+--- a/src/app/shared/fd_config.h
++++ b/src/app/shared/fd_config.h
+@@ -232,6 +232,7 @@ struct fd_config_net {
+   struct {
+     char xdp_mode[ 8 ]; /* "drv", "skb" or "auto" */
+     int  xdp_zero_copy; /* true/false or "auto" */
++    int  experimental_prebind_fill; /* publish physical FILL before bind */
+     char poll_mode[ 16 ]; /* "prefbusy", "softirq" or "auto" */
+ 
+     uint xdp_rx_queue_size;
+diff --git a/src/app/shared/fd_config_json.c b/src/app/shared/fd_config_json.c
+index ea06320..0ed1434 100644
+--- a/src/app/shared/fd_config_json.c
++++ b/src/app/shared/fd_config_json.c
+@@ -438,6 +438,7 @@ fd_config_to_json( fd_config_t const * config,
+     jw_obj_open( &w, "xdp" );
+       jw_str  ( &w, "xdp_mode",             config->net.xdp.xdp_mode );
+       jw_bool ( &w, "xdp_zero_copy",        config->net.xdp.xdp_zero_copy );
++      jw_bool ( &w, "experimental_prebind_fill", config->net.xdp.experimental_prebind_fill );
+       jw_str  ( &w, "poll_mode",            config->net.xdp.poll_mode );
+       jw_ulong( &w, "xdp_rx_queue_size",    config->net.xdp.xdp_rx_queue_size );
+       jw_ulong( &w, "xdp_tx_queue_size",    config->net.xdp.xdp_tx_queue_size );
+diff --git a/src/app/shared/fd_config_parse.c b/src/app/shared/fd_config_parse.c
+index 02484ba..e772d8d 100644
+--- a/src/app/shared/fd_config_parse.c
++++ b/src/app/shared/fd_config_parse.c
+@@ -216,6 +216,7 @@ fd_config_extract_pod( uchar *       pod,
+   CFG_POP      ( uint,   net.ingress_buffer_size                          );
+   CFG_POP      ( cstr,   net.xdp.xdp_mode                                 );
+   CFG_POP      ( boolau, net.xdp.xdp_zero_copy                            );
++  CFG_POP      ( bool,   net.xdp.experimental_prebind_fill                );
+   CFG_POP      ( cstr,   net.xdp.poll_mode                                );
+   CFG_POP      ( uint,   net.xdp.xdp_rx_queue_size                        );
+   CFG_POP      ( uint,   net.xdp.xdp_tx_queue_size                        );
+diff --git a/src/app/shared/test_auto_net.c b/src/app/shared/test_auto_net.c
+index 178dcd4..e2ae3d7 100644
+--- a/src/app/shared/test_auto_net.c
++++ b/src/app/shared/test_auto_net.c
+@@ -1,5 +1,7 @@
+ #include "fd_auto_net.c" /* fd_auto_net_apply is static */
+ 
++#include <sys/wait.h>
++
+ /* Test the auto config resolution policy with hand built system
+    info.  The scrape functions (uname, sysfs, bonding) are not
+    covered here. */
+@@ -25,6 +27,30 @@ reset_provider_auto( uint net_tile_cnt ) {
+   strcpy( config->net.provider, "auto" );
+ }
+ 
++/* Interface classification must reject unsafe prebind use even when
++   native_bond is explicitly false.  The disabled path stays unchanged. */
++static int
++prebind_interface_is_valid( fd_auto_info_t const * info,
++                           int                    enabled ) {
++  int pid = fork();
++  FD_TEST( pid>=0 );
++  if( FD_UNLIKELY( !pid ) ) {
++    reset_auto( 1U );
++    config->net.xdp.experimental_prebind_fill = enabled;
++    strcpy( config->net.xdp.xdp_mode, "drv" );
++    strcpy( config->net.xdp.rss_queue_mode, "dedicated" );
++    config->net.xdp.xdp_zero_copy = 1;
++    config->net.xdp.native_bond   = 0;
++    config->net.xdp.xdp_rx_queue_size = 1024U;
++    fd_auto_net_apply( config, info );
++    FD_TEST( config->net.xdp.native_bond==0 );
++    _exit( 0 );
++  }
++  int status = 0;
++  FD_TEST( waitpid( pid, &status, 0 )==pid );
++  return WIFEXITED( status ) && !WEXITSTATUS( status );
++}
++
+ int
+ main( int     argc,
+       char ** argv ) {
+@@ -184,6 +210,18 @@ main( int     argc,
+   FD_TEST( config->net.xdp.native_bond  ==0 );
+   FD_TEST( config->net.xdp.listen_gre   ==0 );
+ 
++  fd_auto_info_t physical = { .linux_major=6, .linux_minor=8, .driver="bnxt_en" };
++  FD_TEST( prebind_interface_is_valid( &physical, 1 ) );
++  FD_TEST( prebind_interface_is_valid( &physical, 0 ) );
++  for( uint i=1U; i<8U; i++ ) {
++    fd_auto_info_t attached = physical;
++    attached.is_virtual_if  = !!(i & 1U);
++    attached.is_bonded_if   = !!(i & 2U);
++    attached.is_enslaved_if = !!(i & 4U);
++    FD_TEST( !prebind_interface_is_valid( &attached, 1 ) );
++    FD_TEST(  prebind_interface_is_valid( &attached, 0 ) );
++  }
++
+   FD_LOG_NOTICE(( "pass" ));
+   fd_halt();
+ }
+diff --git a/src/app/shared/test_config_json.c b/src/app/shared/test_config_json.c
+index 3a3bf41..cc95a34 100644
+--- a/src/app/shared/test_config_json.c
++++ b/src/app/shared/test_config_json.c
+@@ -113,6 +113,19 @@ main( int     argc,
+     }
+   }
+ 
++  /* The experimental prebind switch is reported as a JSON boolean. */
++  for( int enabled=0; enabled<=1; enabled++ ) {
++    static char prebind_json[ 262144 ];
++    config->net.xdp.experimental_prebind_fill = enabled;
++    FD_TEST( fd_config_to_json( config, prebind_json, sizeof(prebind_json) ) );
++    FD_TEST( strstr( prebind_json, enabled ? "\"experimental_prebind_fill\":true"
++                                         : "\"experimental_prebind_fill\":false" ) );
++    FD_TEST( !strstr( prebind_json, enabled ? "\"experimental_prebind_fill\":false"
++                                          : "\"experimental_prebind_fill\":true" ) );
++    FD_TEST( !strstr( prebind_json, "\"experimental_prebind_fill\":\"" ) );
++  }
++  config->net.xdp.experimental_prebind_fill = 0;
++
+   /* external service urls are fully redacted */
+   FD_TEST( !strstr( json, "SECRET" ) );
+   FD_TEST( !strstr( json, "hunter2" ) );
+diff --git a/src/app/shared/test_config_parse.c b/src/app/shared/test_config_parse.c
+index 2126799..6e1f857 100644
+--- a/src/app/shared/test_config_parse.c
++++ b/src/app/shared/test_config_parse.c
+@@ -37,6 +37,48 @@ static char const cfg_str_vote_history[] =
+ extern uchar const fdctl_default_config[];
+ extern ulong const fdctl_default_config_sz;
+ 
++/* Validate each prerequisite independently, before auto configuration. */
++static int
++prebind_fill_is_valid( config_t * config,
++                      uint       invalid_case,
++                      int        enabled ) {
++  int pid = fork();
++  FD_TEST( pid>=0 );
++  if( FD_UNLIKELY( !pid ) ) {
++    config->net.xdp.experimental_prebind_fill = enabled;
++    strcpy( config->net.provider, "xdp" );
++    strcpy( config->net.xdp.xdp_mode, "drv" );
++    config->net.xdp.xdp_zero_copy = FD_BOOLAU_TRUE;
++    config->net.xdp.native_bond   = FD_BOOLAU_FALSE;
++    strcpy( config->net.xdp.rss_queue_mode, "dedicated" );
++    config->layout.net_tile_count     = 1U;
++    config->net.xdp.xdp_rx_queue_size = 1024U;
++    switch( invalid_case ) {
++    case  0U: break;
++    case  1U: strcpy( config->net.provider, "auto" ); break;
++    case  2U: strcpy( config->net.provider, "socket" ); break;
++    case  3U: strcpy( config->net.provider, "mlx5" ); break;
++    case  4U: strcpy( config->net.xdp.xdp_mode, "auto" ); break;
++    case  5U: strcpy( config->net.xdp.xdp_mode, "skb" ); break;
++    case  6U: strcpy( config->net.xdp.xdp_mode, "default" ); break;
++    case  7U: config->net.xdp.xdp_zero_copy = FD_BOOLAU_AUTO; break;
++    case  8U: config->net.xdp.xdp_zero_copy = FD_BOOLAU_FALSE; break;
++    case  9U: config->net.xdp.native_bond = FD_BOOLAU_AUTO; break;
++    case 10U: config->net.xdp.native_bond = FD_BOOLAU_TRUE; break;
++    case 11U: strcpy( config->net.xdp.rss_queue_mode, "auto" ); break;
++    case 12U: strcpy( config->net.xdp.rss_queue_mode, "simple" ); break;
++    case 13U: config->layout.net_tile_count = 2U; break;
++    case 14U: config->net.xdp.xdp_rx_queue_size = 2048U; break;
++    default: FD_TEST( 0 );
++    }
++    fd_config_validate( config );
++    _exit( 0 );
++  }
++  int status = 0;
++  FD_TEST( waitpid( pid, &status, 0 )==pid );
++  return WIFEXITED( status ) && !WEXITSTATUS( status );
++}
++
+ static int
+ genesis_max_file_size_is_valid( config_t * config,
+                                 ulong      max_file_size_mib ) {
+@@ -182,6 +224,13 @@ main( int     argc,
+   FD_TEST( fd_toml_parse( fdctl_default_config, fdctl_default_config_sz, pod, scratch, sizeof(scratch), NULL ) == FD_TOML_SUCCESS );
+   FD_TEST( fd_config_extract_pod( pod, config ) == config );
+   fd_config_validate( config );  /* exits process with code 1 on failure */
++  FD_TEST( !config->net.xdp.experimental_prebind_fill );
++  FD_TEST( prebind_fill_is_valid( config, 0U, 1 ) );
++  for( uint i=1U; i<=14U; i++ ) {
++    FD_TEST( !prebind_fill_is_valid( config, i, 1 ) );
++    FD_TEST(  prebind_fill_is_valid( config, i, 0 ) );
++  }
++
+ 
+   strcpy( config->net.provider, "auto" );
+   fd_config_validate( config );
+@@ -237,6 +286,24 @@ main( int     argc,
+   FD_TEST( fd_toml_parse( cfg_str_4, sizeof(cfg_str_4)-1, pod, scratch, sizeof(scratch), NULL ) == FD_TOML_SUCCESS );
+   FD_TEST( !fd_config_extract_pod( pod, config ) );
+ 
++  /* The experimental switch is strictly boolean, never auto or numeric. */
++
++  char const * prebind_values[] = { "true", "false", "\"auto\"", "1", "\"true\"" };
++  for( ulong i=0UL; i<5UL; i++ ) {
++    char toml[ 128 ];
++    FD_TEST( fd_cstr_printf_check( toml, sizeof(toml), NULL,
++                                  "[net.xdp]\nexperimental_prebind_fill = %s\n", prebind_values[i] ) );
++    memset( config, 0, sizeof(config_t) );
++    pod = fd_pod_join( fd_pod_new( pod_mem, sizeof(pod_mem) ) );
++    FD_TEST( fd_toml_parse( toml, strlen(toml), pod, scratch, sizeof(scratch), NULL )==FD_TOML_SUCCESS );
++    if( i<2UL ) {
++      FD_TEST( fd_config_extract_pod( pod, config )==config );
++      FD_TEST( config->net.xdp.experimental_prebind_fill==(i==0UL) );
++    } else {
++      FD_TEST( !fd_config_extract_pod( pod, config ) );
++    }
++  }
++
+   /* Parse runtime genesis limits */
+ 
+   memset( config, 0, sizeof(config_t) );
+diff --git a/src/disco/net/fd_net_tile_topo.c b/src/disco/net/fd_net_tile_topo.c
+index 1f1645c..c2e9359 100644
+--- a/src/disco/net/fd_net_tile_topo.c
++++ b/src/disco/net/fd_net_tile_topo.c
+@@ -174,6 +174,7 @@ setup_xdp_tile( fd_topo_t *             topo,
+   tile->xdp.xdp_rx_queue_size   = net_cfg->xdp.xdp_rx_queue_size;
+   tile->xdp.xdp_tx_queue_size   = net_cfg->xdp.xdp_tx_queue_size;
+   tile->xdp.zero_copy           = net_cfg->xdp.xdp_zero_copy;
++  tile->xdp.experimental_prebind_fill = net_cfg->xdp.experimental_prebind_fill;
+   fd_cstr_ncpy( tile->xdp.xdp_mode, net_cfg->xdp.xdp_mode, sizeof(tile->xdp.xdp_mode) );
+ 
+   fd_cstr_ncpy( tile->xdp.poll_mode, net_cfg->xdp.poll_mode, sizeof(tile->xdp.poll_mode) );
+@@ -214,6 +215,21 @@ fd_topos_net_tiles( fd_topo_t *             topo,
+                     ulong                   netlnk_max_neighbors,
+                     int                     xsk_core_dump,
+                     ulong const             tile_to_cpu[ FD_TILE_MAX ] ) {
++  /* Recheck the resolved interface before constructing an XDP topology.
++     native_bond=false alone does not exclude a bond, bridge or slave. */
++  if( net_cfg->xdp.experimental_prebind_fill ) {
++    char path[ PATH_MAX ];
++    if( FD_UNLIKELY( !net_cfg->interface[0] || strchr( net_cfg->interface, '/' ) ) )
++      FD_LOG_ERR(( "experimental pre-bind FILL requires a physical standalone interface" ));
++    FD_TEST( fd_cstr_printf_check( path, sizeof(path), NULL, "/sys/class/net/%s/device", net_cfg->interface ) );
++    if( FD_UNLIKELY( access( path, F_OK ) ) )
++      FD_LOG_ERR(( "experimental pre-bind FILL requires a physical device: %s", net_cfg->interface ));
++    FD_TEST( fd_cstr_printf_check( path, sizeof(path), NULL, "/sys/class/net/%s/master", net_cfg->interface ) );
++    int master_rc = access( path, F_OK );
++    if( FD_UNLIKELY( !master_rc || errno!=ENOENT || fd_bonding_is_master( net_cfg->interface ) ) )
++      FD_LOG_ERR(( "experimental pre-bind FILL rejects bonded/enslaved interfaces: %s", net_cfg->interface ));
++  }
++
+   /* net_umem: Packet buffers */
+   fd_topob_wksp( topo, "net_umem" );
+ 
+diff --git a/src/disco/net/xdp/fd_xdp_tile.c b/src/disco/net/xdp/fd_xdp_tile.c
+index 4c1482a..1d5b1a5 100644
+--- a/src/disco/net/xdp/fd_xdp_tile.c
++++ b/src/disco/net/xdp/fd_xdp_tile.c
+@@ -25,6 +25,7 @@
+ #include "../../../waltz/mib/fd_netdev_tbl.h"
+ #include "../../../waltz/xdp/fd_xdp_redirect_user.h" /* fd_xsk_activate */
+ #include "../../../waltz/xdp/fd_xsk.h"
++#include "../../../waltz/xdp/fd_xsk_prebind.h"
+ #include "../../../util/log/fd_dtrace.h"
+ #include "../../../util/net/fd_eth.h"
+ #include "../../../util/net/fd_ip4.h"
+@@ -202,6 +203,7 @@ typedef struct {
+   /* UMEM frame region within dcache */
+   void *   umem;    /* Start of UMEM */
+   ulong    umem_sz; /* Size  of UMEM */
++  fd_xsk_prebind_layout_t prebind;
+ 
+   /* Details pertaining to an inflight send op */
+   struct {
+@@ -1063,6 +1065,25 @@ net_xsk_bootstrap( fd_net_ctx_t * ctx,
+   return frame_off;
+ }
+ 
++/* The physical span was published before bind when requested.  The
++   kernel may already have consumed entries, so do not reset or republish
++   that ring here.  Legacy and loopback bootstrap retain their ordering. */
++static ulong
++net_xsk_bootstrap_after_bind( fd_net_ctx_t * ctx,
++                              uint           xsk_idx,
++                              ulong          frame_off,
++                              int            prebind_fill ) {
++  if( !prebind_fill ) return net_xsk_bootstrap( ctx, xsk_idx, frame_off );
++  if( xsk_idx==0U ) {
++    FD_TEST( frame_off==ctx->prebind.phys_off );
++    return ctx->prebind.loop_off;
++  }
++  FD_TEST( xsk_idx==1U && frame_off==ctx->prebind.loop_off );
++  frame_off = net_xsk_bootstrap( ctx, xsk_idx, frame_off );
++  FD_TEST( frame_off==ctx->prebind.end_off );
++  return frame_off;
++}
++
+ /* FIXME source MAC address from netlnk tile instead */
+ 
+ static void
+@@ -1128,6 +1149,8 @@ privileged_init( fd_topo_t const *      topo,
+   ulong  const umem_frame_sz       = 2048UL;
+   ulong  const umem_sz             = fd_ulong_align_dn( umem_dcache_data_sz, umem_frame_sz );
+ 
++  if( FD_UNLIKELY( umem_sz<umem_frame_sz ) ) FD_LOG_ERR(( "UMEM is too small" ));
++
+   /* Derive chunk bounds */
+ 
+   void * const umem_base   = fd_wksp_containing( dcache_mem );
+@@ -1181,6 +1204,27 @@ privileged_init( fd_topo_t const *      topo,
+ 
+   fd_cstr_ncpy( params0.poll_mode, tile->xdp.poll_mode, sizeof(params0.poll_mode) );
+ 
++  if( tile->xdp.experimental_prebind_fill ) {
++    /* Initially qualified scope: one physical pool, explicit queue/mode,
++       standalone interface. No auto-enablement for other deployments. */
++    if( FD_UNLIKELY( tile->xdp.zero_copy!=1 || tile->kind_id ||
++        fd_topo_tile_name_cnt( topo, tile->name )!=1UL || tile->xdp.if_queue!=0U ||
++        strcmp( tile->xdp.if_virt, tile->xdp.if_phys ) || !strcmp( tile->xdp.if_phys, "lo" ) ||
++        tile->xdp.xdp_rx_queue_size!=1024UL ) )
++      FD_LOG_ERR(( "experimental pre-bind FILL requires one standalone zero-copy queue 0, RX depth 1024" ));
++    ulong cache_cnt = 0UL;
++    for( ulong i=0UL; i<tile->out_cnt; i++ ) {
++      ulong depth = topo->links[ tile->out_link_id[i] ].depth;
++      if( FD_UNLIKELY( depth>umem_sz/2048UL-cache_cnt ) ) FD_LOG_ERR(( "RX cache exceeds UMEM" ));
++      cache_cnt += depth;
++    }
++    if( FD_UNLIKELY( fd_xsk_prebind_layout( &ctx->prebind, umem_sz, umem_frame_sz,
++        tile->xdp.free_ring_depth, cache_cnt, 1024UL, 1024UL ) ) )
++      FD_LOG_ERR(( "invalid experimental prebind UMEM partition" ));
++    params0.initial_fill_off = ctx->prebind.phys_off;
++    params0.initial_fill_cnt = ctx->prebind.phys_cnt;
++  }
++
+   /* Re-derive XDP file descriptors */
+ 
+   fd_xdp_fds_t xdp_fds[ FD_TOPO_XDP_FDS_MAX ];
+@@ -1227,6 +1271,11 @@ privileged_init( fd_topo_t const *      topo,
+     params1.if_idx      = lo_idx; /* probably always 1 */
+     params1.if_queue_id = 0;
+     params1.bind_flags  = 0;
++    if( tile->xdp.experimental_prebind_fill ) {
++      params1.bind_flags       = XDP_COPY;
++      params1.initial_fill_off = 0UL;
++      params1.initial_fill_cnt = 0UL;
++    }
+     if( FD_UNLIKELY( !fd_xsk_init( &ctx->xsk[ 1 ], &params1 ) ) )          FD_LOG_ERR(( "failed to bind lo_xsk" ));
+     if( FD_UNLIKELY( !fd_xsk_activate( &ctx->xsk[ 1 ], lo_xsk_map_fd ) ) ) FD_LOG_ERR(( "failed to activate lo_xsk" ));
+   }
+@@ -1372,17 +1421,20 @@ unprivileged_init( fd_topo_t const *      topo,
+   for( ulong i=0UL; i<(tile->out_cnt); i++ ) {
+     fd_topo_link_t const * out_link = &topo->links[ tile->out_link_id[ i  ] ];
+     fd_frag_meta_t * mcache = out_link->mcache;
++    if( tile->xdp.experimental_prebind_fill ) FD_TEST( fd_mcache_depth( mcache )==out_link->depth );
+     for( ulong j=0UL; j<fd_mcache_depth( mcache ); j++ ) {
+       mcache[ j ].chunk = (uint)( ctx->net.pkt_buf_chunk0 + (frame_off>>FD_CHUNK_LG_SZ) );
+       frame_off += frame_sz;
+     }
+   }
+ 
++  if( tile->xdp.experimental_prebind_fill ) FD_TEST( frame_off==ctx->prebind.phys_off && ctx->xsk_cnt==2U );
++
+   /* Initialize FILL ring */
+ 
+   int _charge_busy = 0;
+   for( uint j=0U; j<ctx->xsk_cnt; j++ ) {
+-    frame_off = net_xsk_bootstrap( ctx, j, frame_off );
++    frame_off = net_xsk_bootstrap_after_bind( ctx, j, frame_off, tile->xdp.experimental_prebind_fill );
+     net_rx_wakeup( ctx, &ctx->xsk[ j ], &_charge_busy );
+     net_tx_wakeup( ctx, &ctx->xsk[ j ], &_charge_busy );
+   }
+diff --git a/src/disco/net/xdp/test_xdp_tile.c b/src/disco/net/xdp/test_xdp_tile.c
+index fba4d2d..5861d2f 100644
+--- a/src/disco/net/xdp/test_xdp_tile.c
++++ b/src/disco/net/xdp/test_xdp_tile.c
+@@ -271,12 +271,44 @@ setup_netdev_table( fd_net_ctx_t * ctx ) {
+ }
+ 
+ 
++static void
++test_prebind_bootstrap( void ) {
++  static fd_net_ctx_t ctx;
++  static ulong physical[2048];
++  static ulong loopback[2048];
++  uint prod0=1024U, cons0=512U, prod1=0U, cons1=0U;
++  fd_memset( &ctx, 0, sizeof(ctx) );
++  FD_TEST( !fd_xsk_prebind_layout( &ctx.prebind, 16UL*1024UL*1024UL,
++                                  2048UL, 1024UL, 512UL, 1024UL, 1024UL ) );
++  for( ulong j=0UL; j<2048UL; j++ ) physical[j]=ULONG_MAX;
++  ctx.xsk[0].ring_fr=(fd_xdp_ring_t){ .frame_ring=physical, .depth=2048UL,
++    .prod=&prod0, .cons=&cons0, .cached_prod=1024U, .cached_cons=512U };
++  ctx.xsk[1].ring_fr=(fd_xdp_ring_t){ .frame_ring=loopback, .depth=2048UL,
++    .prod=&prod1, .cons=&cons1 };
++
++  ulong off=net_xsk_bootstrap_after_bind( &ctx, 0U, ctx.prebind.phys_off, 1 );
++  FD_TEST( off==ctx.prebind.loop_off );
++  FD_TEST( prod0==1024U && cons0==512U );
++  FD_TEST( ctx.xsk[0].ring_fr.cached_prod==1024U && ctx.xsk[0].ring_fr.cached_cons==512U );
++  for( ulong j=0UL; j<2048UL; j++ ) FD_TEST( physical[j]==ULONG_MAX );
++  off=net_xsk_bootstrap_after_bind( &ctx, 1U, off, 1 );
++  FD_TEST( off==ctx.prebind.end_off && prod1==1024U && cons1==0U );
++  for( ulong j=0UL; j<1024UL; j++ ) FD_TEST( loopback[j]==ctx.prebind.loop_off+j*2048UL );
++
++  /* Disabled option retains the ordinary physical bootstrap. */
++  prod0=0U; cons0=0U; ctx.xsk[0].ring_fr.cached_prod=0U; ctx.xsk[0].ring_fr.cached_cons=0U;
++  off=net_xsk_bootstrap_after_bind( &ctx, 0U, ctx.prebind.phys_off, 0 );
++  FD_TEST( off==ctx.prebind.loop_off && prod0==1024U && cons0==0U );
++  for( ulong j=0UL; j<1024UL; j++ ) FD_TEST( physical[j]==ctx.prebind.phys_off+j*2048UL );
++}
++
+ int
+ main( int     argc,
+       char ** argv ) {
+   fd_boot( &argc, &argv );
+ 
+   test_net_tx_ready();
++  test_prebind_bootstrap();
+ 
+   ulong cpu_idx = fd_tile_cpu_id( fd_tile_idx() );
+   if( cpu_idx>fd_shmem_cpu_cnt() ) cpu_idx = 0UL;
+diff --git a/src/disco/topo/fd_topo.h b/src/disco/topo/fd_topo.h
+index 4c47d57..4c43922 100644
+--- a/src/disco/topo/fd_topo.h
++++ b/src/disco/topo/fd_topo.h
+@@ -198,6 +198,7 @@ struct fd_topo_tile {
+       long   tx_flush_timeout_ns;
+       char   xdp_mode[8];
+       int    zero_copy;
++      int    experimental_prebind_fill;
+ 
+       char poll_mode[ 16 ]; /* "softirq" or "prefbusy" */
+ 
+diff --git a/src/waltz/xdp/Local.mk b/src/waltz/xdp/Local.mk
+index 4e64735..e45117e 100644
+--- a/src/waltz/xdp/Local.mk
++++ b/src/waltz/xdp/Local.mk
+@@ -1,9 +1,15 @@
+-$(call add-hdrs,fd_xsk.h fd_xdp_redirect_user.h)
++$(call add-hdrs,fd_xsk.h fd_xsk_prebind.h fd_xdp_redirect_user.h)
+ 
+ ifdef FD_HAS_HOSTED
+ ifdef FD_HAS_LINUX
+ $(call add-objs,fd_xsk fd_xdp1 fd_xdp_redirect_user,fd_waltz)
+ 
++$(call make-unit-test,test_xsk_init_prebind,test_xsk_init_prebind,)
++$(call run-unit-test,test_xsk_init_prebind)
++
++$(call make-unit-test,test_xsk_prebind,test_xsk_prebind,)
++$(call run-unit-test,test_xsk_prebind)
++
+ $(call make-unit-test,test_xsk,test_xsk,fd_waltz fd_util)
+ $(call run-unit-test,test_xsk)
+ 
+diff --git a/src/waltz/xdp/fd_xsk.c b/src/waltz/xdp/fd_xsk.c
+index 144e295..96c151f 100644
+--- a/src/waltz/xdp/fd_xsk.c
++++ b/src/waltz/xdp/fd_xsk.c
+@@ -16,6 +16,7 @@
+ 
+ #include "../../util/log/fd_log.h"
+ #include "fd_xsk.h"
++#include "fd_xsk_prebind.h"
+ 
+ /* Support for older kernels */
+ 
+@@ -283,6 +284,15 @@ fd_xsk_init( fd_xsk_t *              xsk,
+     return NULL;
+   }
+ 
++  if( FD_UNLIKELY( params->initial_fill_cnt &&
++      (params->bind_flags!=XDP_ZEROCOPY || params->frame_sz!=2048UL ||
++       params->initial_fill_cnt>params->fr_depth ||
++       params->initial_fill_off%2048UL || params->initial_fill_off>params->umem_sz ||
++       params->initial_fill_cnt>(params->umem_sz-params->initial_fill_off)/2048UL) ) ) {
++    FD_LOG_WARNING(( "invalid initial FILL span or zero-copy mode" ));
++    return NULL;
++  }
++
+   xsk->if_idx      = params->if_idx;
+   xsk->if_queue_id = params->if_queue_id;
+ 
+@@ -305,6 +315,14 @@ fd_xsk_init( fd_xsk_t *              xsk,
+   if( FD_UNLIKELY( 0!=fd_xsk_mmap_ring( &xsk->ring_fr, xsk->xsk_fd, XDP_UMEM_PGOFF_FILL_RING,       sizeof(ulong),           params->fr_depth, &xsk->offsets.fr ) ) ) goto fail;
+   if( FD_UNLIKELY( 0!=fd_xsk_mmap_ring( &xsk->ring_cr, xsk->xsk_fd, XDP_UMEM_PGOFF_COMPLETION_RING, sizeof(ulong),           params->cr_depth, &xsk->offsets.cr ) ) ) goto fail;
+ 
++  /* Only a fresh, still-unbound socket can publish this reserved span. */
++  if( params->initial_fill_cnt ) {
++    fd_xdp_ring_t * fill = &xsk->ring_fr;
++    if( FD_UNLIKELY( fd_xsk_prebind_publish( fill->frame_ring, fill->prod, fill->cons,
++        &fill->cached_prod, &fill->cached_cons, fill->depth,
++        params->initial_fill_off, params->initial_fill_cnt, params->umem_sz ) ) ) goto fail;
++  }
++
+   /* Bind XSK to queue on network interface */
+ 
+   uint flags = XDP_USE_NEED_WAKEUP | params->bind_flags;
+@@ -327,6 +345,18 @@ fd_xsk_init( fd_xsk_t *              xsk,
+     goto fail;
+   }
+ 
++  if( params->initial_fill_cnt ) {
++    struct xdp_options options = {0};
++    socklen_t options_sz = sizeof(options);
++    if( FD_UNLIKELY( getsockopt( xsk->xsk_fd, SOL_XDP, XDP_OPTIONS, &options, &options_sz ) ||
++        options_sz!=sizeof(options) || !(options.flags & XDP_OPTIONS_ZEROCOPY) ) ) {
++      FD_LOG_WARNING(( "initial FILL path did not confirm runtime XDP zero-copy" ));
++      goto fail;
++    }
++    FD_LOG_NOTICE(( "pre-bind FILL: off=%lu count=%lu; runtime XDP zero-copy confirmed",
++                   params->initial_fill_off, params->initial_fill_cnt ));
++  }
++
+   /* We've seen that some popular Intel NICs seem to have a bug that
+      prevents them from working in SKB mode with certain kernel
+      versions.  We can identify them by sendto returning ENXIO or EINVAL
+diff --git a/src/waltz/xdp/fd_xsk.h b/src/waltz/xdp/fd_xsk.h
+index feb7536..8822487 100644
+--- a/src/waltz/xdp/fd_xsk.h
++++ b/src/waltz/xdp/fd_xsk.h
+@@ -217,6 +217,11 @@ struct fd_xsk_params {
+   /* sockaddr_xdp.sxdp_flags additional params, e.g. XDP_ZEROCOPY */
+   uint bind_flags;
+ 
++  /* Optional fresh FILL span published before bind. Zero count preserves
++     the normal path. Nonzero requires explicit zero-copy and 2048B frames. */
++  ulong initial_fill_off;
++  ulong initial_fill_cnt;
++
+   /* Whether to use softirqs to poll napi or prefbusy poll */
+   char poll_mode[ 16 ];
+ 
+diff --git a/src/waltz/xdp/fd_xsk_prebind.h b/src/waltz/xdp/fd_xsk_prebind.h
+new file mode 100644
+index 0000000..b81d003
+--- /dev/null
++++ b/src/waltz/xdp/fd_xsk_prebind.h
+@@ -0,0 +1,54 @@
++#ifndef HEADER_fd_src_waltz_xdp_fd_xsk_prebind_h
++#define HEADER_fd_src_waltz_xdp_fd_xsk_prebind_h
++
++/* Pure layout and fresh-ring publication primitives. The experimental
++   opt-in initializer transfers the published physical span before bind. */
++#include <limits.h>
++
++struct fd_xsk_prebind_layout {
++  unsigned long tx_off, cache_off, phys_off, loop_off, end_off;
++  unsigned long tx_cnt, cache_cnt, phys_cnt, loop_cnt;
++};
++typedef struct fd_xsk_prebind_layout fd_xsk_prebind_layout_t;
++
++static inline int
++fd_xsk_prebind_layout( fd_xsk_prebind_layout_t * out,
++                      unsigned long umem_sz, unsigned long frame_sz,
++                      unsigned long tx_cnt, unsigned long cache_cnt,
++                      unsigned long phys_cnt, unsigned long loop_cnt ) {
++  if( !out || frame_sz!=2048UL || umem_sz%frame_sz || !phys_cnt ) return -1;
++  unsigned long counts[4]={tx_cnt,cache_cnt,phys_cnt,loop_cnt};
++  unsigned long offsets[5]={0UL,0UL,0UL,0UL,0UL};
++  for( unsigned i=0U; i<4U; i++ ) {
++    if( counts[i]>(umem_sz-offsets[i])/frame_sz ) return -1;
++    offsets[i+1U]=offsets[i]+counts[i]*frame_sz;
++  }
++  fd_xsk_prebind_layout_t result={ offsets[0],offsets[1],offsets[2],offsets[3],offsets[4],
++                                 tx_cnt,cache_cnt,phys_cnt,loop_cnt };
++  *out=result;
++  return 0;
++}
++
++/* Fresh, unbound FILL ring only. Caller supplies one validated disjoint
++   physical span.  Reject reuse rather than resetting a potentially live
++   ring. Zero counters alone do not prove the socket is unbound; the caller
++   must establish that and nonaliasing ring/control storage. No writes on error; release publication follows all descriptors. */
++static inline int
++fd_xsk_prebind_publish( unsigned long * descriptors,
++                       unsigned int * producer, unsigned int const * consumer,
++                       unsigned int * cached_prod, unsigned int const * cached_cons,
++                       unsigned long depth, unsigned long offset,
++                       unsigned long count, unsigned long umem_sz ) {
++  if( !descriptors || !producer || !consumer || !cached_prod || !cached_cons ||
++      !depth || (depth&(depth-1UL)) || depth>UINT_MAX || !count || count>depth ||
++      umem_sz%2048UL || offset%2048UL || offset>umem_sz ||
++      count>(umem_sz-offset)/2048UL ) return -1;
++  if( *cached_prod || *cached_cons ||
++      __atomic_load_n( producer, __ATOMIC_ACQUIRE ) ||
++      __atomic_load_n( consumer, __ATOMIC_ACQUIRE ) ) return -1;
++  for( unsigned long i=0UL; i<count; i++ ) descriptors[i]=offset+i*2048UL;
++  *cached_prod=(unsigned int)count;
++  __atomic_store_n( producer, (unsigned int)count, __ATOMIC_RELEASE );
++  return 0;
++}
++#endif
+diff --git a/src/waltz/xdp/test_xsk_init_prebind.c b/src/waltz/xdp/test_xsk_init_prebind.c
+new file mode 100644
+index 0000000..38c95f2
+--- /dev/null
++++ b/src/waltz/xdp/test_xsk_init_prebind.c
+@@ -0,0 +1,83 @@
++#define _GNU_SOURCE
++#include <stdio.h>
++#include <stdlib.h>
++#include <stdarg.h>
++#include <stdint.h>
++#include <errno.h>
++#include <string.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <sys/socket.h>
++#include <sys/syscall.h>
++#include <net/if.h>
++#include "fd_xsk.h"
++#include "../../util/log/fd_log.h"
++#define CHECK(x) do {if(!(x)){fprintf(stderr,"FAIL %d: %s\n",__LINE__,#x);abort();}}while(0)
++static void mock_log(char const *fmt,...){(void)fmt;}
++#undef FD_LOG_WARNING
++#undef FD_LOG_INFO
++#undef FD_LOG_NOTICE
++#undef FD_LOG_ERR
++#define FD_LOG_WARNING(a) mock_log a
++#define FD_LOG_INFO(a) mock_log a
++#define FD_LOG_NOTICE(a) mock_log a
++#define FD_LOG_ERR(a) do {mock_log a;abort();}while(0)
++char const *fd_io_strerror(int e){(void)e;return "mock";}
++static unsigned sockets,binds,closes,maps,unmaps,option_reads;
++static unsigned expect_count;static unsigned long expect_off;
++static int fail_bind,fail_option,fail_map,dirty_fill;
++static void *fill;
++static int mock_socket(int a,int b,int c){CHECK(a==AF_XDP);(void)b;(void)c;sockets++;return 77;}
++static int mock_close(int f){CHECK(f==77);closes++;return 0;}
++static int mock_setsockopt(int f,int l,int n,void const *p,socklen_t z){CHECK(f==77);(void)l;(void)n;(void)p;(void)z;return 0;}
++static int mock_getsockopt(int f,int l,int n,void *p,socklen_t *z){CHECK(f==77&&l==SOL_XDP);
++ if(n==XDP_MMAP_OFFSETS){struct xdp_mmap_offsets *o=p;memset(o,0,sizeof(*o));struct xdp_ring_offset v={.producer=0,.consumer=4,.flags=8,.desc=64};o->rx=o->tx=o->fr=o->cr=v;*z=sizeof(*o);return 0;}
++ CHECK(n==XDP_OPTIONS);option_reads++;((struct xdp_options *)p)->flags=fail_option?0:XDP_OPTIONS_ZEROCOPY;*z=sizeof(struct xdp_options);return 0;
++}
++static void *mock_mmap(void *a,size_t n,int p,int fl,int fd,off_t off){(void)a;(void)p;(void)fl;CHECK(fd==77);maps++;
++ if((int)maps==fail_map){errno=ENOMEM;return MAP_FAILED;}
++ void *m=calloc(1,n);CHECK(m);if(off==XDP_UMEM_PGOFF_FILL_RING){fill=m;if(dirty_fill)*(unsigned *)m=1;}return m;
++}
++static int mock_munmap(void *p,size_t n){(void)n;unmaps++;free(p);return 0;}
++static long mock_syscall(long n,...){CHECK(n==SYS_mlock);return 0;}
++static int mock_bind(int f,struct sockaddr const *a,socklen_t n){CHECK(f==77);(void)n;binds++;
++ struct sockaddr_xdp const *s=(void const *)a;CHECK(fill);CHECK(s->sxdp_queue_id==0);CHECK(*(unsigned *)fill==expect_count);
++ if(expect_count){CHECK(s->sxdp_flags&XDP_ZEROCOPY);unsigned long *d=(void *)((char *)fill+64);CHECK(d[0]==expect_off);CHECK(d[expect_count-1]==expect_off+(expect_count-1)*2048UL);*(unsigned *)((char *)fill+4)=512;}
++ if(fail_bind){errno=EOPNOTSUPP;return -1;}return 0;
++}
++static ssize_t mock_sendto(int f,void const *b,size_t n,int fl,struct sockaddr const *a,socklen_t z){CHECK(f==77);(void)b;(void)n;(void)fl;(void)a;(void)z;return 0;}
++static char *mock_if_indextoname(unsigned n,char *b){(void)n;strcpy(b,"mock0");return b;}
++static int mock_fcntl(int f,int c,...){(void)f;(void)c;return 0;}
++#define socket mock_socket
++#define close mock_close
++#define setsockopt mock_setsockopt
++#define getsockopt mock_getsockopt
++#define mmap mock_mmap
++#define munmap mock_munmap
++#define syscall mock_syscall
++#define bind mock_bind
++#define sendto mock_sendto
++#define if_indextoname mock_if_indextoname
++#define fcntl mock_fcntl
++#include "fd_xsk.c"
++static void reset(void){sockets=binds=closes=maps=unmaps=option_reads=0;expect_count=0;expect_off=0;fail_bind=fail_option=fail_map=dirty_fill=0;fill=NULL;}
++int main(void){
++ void *mem=NULL;CHECK(!posix_memalign(&mem,4096,8UL*1024*1024));
++ fd_xsk_params_t p={.fr_depth=2048,.rx_depth=1024,.cr_depth=1024,.tx_depth=1024,.umem_addr=mem,.frame_sz=2048,.umem_sz=8UL*1024*1024,.if_idx=2,.if_queue_id=0,.bind_flags=XDP_COPY};
++ fd_xsk_t x;
++ reset();CHECK(fd_xsk_init(&x,&p)==&x);CHECK(binds==1&&option_reads==0);fd_xsk_fini(&x);CHECK(closes==1&&unmaps==4);
++ p.bind_flags=XDP_ZEROCOPY;
++ reset();CHECK(fd_xsk_init(&x,&p)==&x);CHECK(binds==1&&option_reads==0);fd_xsk_fini(&x);CHECK(closes==1&&unmaps==4);
++ p.if_idx=1;p.bind_flags=XDP_COPY;
++ reset();CHECK(fd_xsk_init(&x,&p)==&x);CHECK(binds==1&&option_reads==0);fd_xsk_fini(&x);CHECK(closes==1&&unmaps==4);
++ p.if_idx=2;p.bind_flags=XDP_ZEROCOPY;
++ p.initial_fill_off=2UL*1024*1024;p.initial_fill_cnt=1024;
++ reset();expect_count=1024;expect_off=p.initial_fill_off;CHECK(fd_xsk_init(&x,&p)==&x);CHECK(option_reads==1&&x.ring_fr.cached_prod==1024&&*x.ring_fr.cons==512);fd_xsk_fini(&x);CHECK(closes==1&&unmaps==4);
++ reset();p.bind_flags=XDP_COPY;CHECK(!fd_xsk_init(&x,&p));CHECK(sockets==0);p.bind_flags=XDP_ZEROCOPY;
++ reset();expect_count=1024;expect_off=p.initial_fill_off;fail_bind=1;CHECK(!fd_xsk_init(&x,&p));CHECK(binds==1&&option_reads==0&&closes==1&&unmaps==4);
++ reset();expect_count=1024;expect_off=p.initial_fill_off;fail_option=1;CHECK(!fd_xsk_init(&x,&p));CHECK(binds==1&&option_reads==1&&closes==1&&unmaps==4);
++ reset();fail_map=3;CHECK(!fd_xsk_init(&x,&p));CHECK(binds==0&&closes==1&&unmaps==2);
++ reset();dirty_fill=1;CHECK(!fd_xsk_init(&x,&p));CHECK(binds==0&&closes==1&&unmaps==4);
++ free(mem);puts("actual fd_xsk_init mocked-syscall regression PASS (9 cases; no sockets)");return 0;
++}
+diff --git a/src/waltz/xdp/test_xsk_prebind.c b/src/waltz/xdp/test_xsk_prebind.c
+new file mode 100644
+index 0000000..7fa300b
+--- /dev/null
++++ b/src/waltz/xdp/test_xsk_prebind.c
+@@ -0,0 +1,58 @@
++/* Pure offline tests: no socket, mmap, BPF, module or host calls. */
++#include "fd_xsk_prebind.h"
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++
++#define CHECK(c) do { if( !(c) ) { fprintf(stderr,"check failed line %d: %s\n",__LINE__,#c); abort(); } } while(0)
++
++int main( void ) {
++  fd_xsk_prebind_layout_t l;
++  unsigned long frames=64UL+128UL+1024UL+1024UL;
++  CHECK( !fd_xsk_prebind_layout(&l,frames*2048UL,2048UL,64UL,128UL,1024UL,1024UL) );
++  CHECK(l.tx_off==0UL && l.cache_off==64UL*2048UL && l.phys_off==192UL*2048UL);
++  CHECK(l.loop_off==1216UL*2048UL && l.end_off==frames*2048UL);
++  fd_xsk_prebind_layout_t before=l;
++  CHECK(fd_xsk_prebind_layout(&l,(frames-1UL)*2048UL,2048UL,64UL,128UL,1024UL,1024UL));
++  CHECK(!memcmp(&l,&before,sizeof(l)));
++  CHECK(fd_xsk_prebind_layout(&l,ULONG_MAX,2048UL,1UL,1UL,1UL,1UL));
++  CHECK(fd_xsk_prebind_layout(&l,2048UL,2048UL,ULONG_MAX,0UL,1UL,0UL));
++  CHECK(fd_xsk_prebind_layout(&l,4096UL,1024UL,0UL,0UL,1UL,0UL));
++  CHECK(fd_xsk_prebind_layout(&l,4096UL,2048UL,0UL,0UL,0UL,0UL));
++  CHECK(!fd_xsk_prebind_layout(&l,1024UL*2048UL,2048UL,0UL,0UL,1024UL,0UL));
++  CHECK(l.loop_off==l.end_off && l.loop_cnt==0UL);
++
++  unsigned long d[2048]; for(unsigned i=0U;i<2048U;i++)d[i]=ULONG_MAX;
++  unsigned int p=0U,c=0U,cp=0U,cc=0U;
++  l=before;
++  CHECK(!fd_xsk_prebind_publish(d,&p,&c,&cp,&cc,2048UL,l.phys_off,l.phys_cnt,l.end_off));
++  CHECK(p==1024U && cp==1024U && !c && !cc);
++  for(unsigned i=0U;i<1024U;i++)CHECK(d[i]==l.phys_off+(unsigned long)i*2048UL);
++  CHECK(d[1024]==ULONG_MAX); /* loopback/TX/cache not published */
++  CHECK(fd_xsk_prebind_publish(d,&p,&c,&cp,&cc,2048UL,l.phys_off,l.phys_cnt,l.end_off));
++  CHECK(p==1024U && cp==1024U); /* no double bootstrap */
++  for(unsigned which=0U;which<4U;which++) {
++    p=c=cp=cc=0U;
++    unsigned int * fields[4]={&p,&c,&cp,&cc}; *fields[which]=1U;
++    CHECK(fd_xsk_prebind_publish(d,&p,&c,&cp,&cc,2048UL,l.phys_off,l.phys_cnt,l.end_off));
++  }
++  p=c=cp=cc=0U;unsigned long first=d[0];
++  CHECK(fd_xsk_prebind_publish(d,&p,&c,&cp,&cc,511UL,0UL,1UL,l.end_off));
++  CHECK(fd_xsk_prebind_publish(d,&p,&c,&cp,&cc,512UL,0UL,1024UL,l.end_off));
++  CHECK(fd_xsk_prebind_publish(d,&p,&c,&cp,&cc,2048UL,1UL,1UL,l.end_off));
++  CHECK(fd_xsk_prebind_publish(d,&p,&c,&cp,&cc,2048UL,ULONG_MAX,1UL,l.end_off));
++  CHECK(fd_xsk_prebind_publish(d,&p,&c,&cp,&cc,2048UL,0UL,ULONG_MAX,l.end_off));
++  CHECK(d[0]==first && !p && !cp);
++  unsigned long max_aligned=ULONG_MAX-(ULONG_MAX%2048UL);
++  unsigned long max_frames=max_aligned/2048UL;
++  CHECK(!fd_xsk_prebind_layout(&l,max_aligned,2048UL,max_frames-1024UL,0UL,1024UL,0UL));
++  CHECK(l.end_off==max_aligned);
++  CHECK(fd_xsk_prebind_layout(&l,max_aligned,2048UL,max_frames-1024UL,0UL,1025UL,0UL));
++  l=before;
++  unsigned long loop[2048]; unsigned int lp=0U,lc=0U,lcp=0U,lcc=0U;
++  CHECK(!fd_xsk_prebind_publish(loop,&lp,&lc,&lcp,&lcc,2048UL,l.loop_off,l.loop_cnt,l.end_off));
++  CHECK(loop[0]==l.loop_off && loop[1023]+2048UL==l.end_off);
++  CHECK(d[1023]+2048UL==loop[0]); /* physical and loopback spans touch, never overlap */
++  puts("PASS prebind layout, bounds, disjoint spans, publication and double-bootstrap refusal (offline)");
++  return 0;
++}

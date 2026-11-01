@@ -1,4 +1,8 @@
-# Reconstruct and build; never install automatically
+# Historical measured-source reconstruction
+
+This page reproduces the original compile-time-prebind voting-hour checkpoint. For the subsequent stable-initial-fill correction and runtime-option candidate, follow [corrected-source instructions](corrected-source.md). Preserve both checkpoints; do not attribute the original performance hour to corrected code.
+
+## Reconstruct and build; never install automatically
 
 Obtain the exact vendor source archive identified in PROVENANCE through the official vendor download process. Verify its SHA256 before safe extraction (reject absolute/traversal members). Work in a new directory, not a live module/source tree. Let PACKAGE be this package's absolute path.
 

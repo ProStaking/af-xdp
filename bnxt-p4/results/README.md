@@ -1,3 +1,7 @@
+# Completed voting checkpoint
+
+The later trial passed 361 samples over 3600.000114 seconds, after fresh trusted snapshot restoration and catch-up. See [voting-hour.md](voting-hour.md) and the sanitized JSON. P4 stayed voting; X710 stayed stopped and zero-copy-ready. This supersedes only the earlier statement that voting had not yet been tested.
+
 # Results
 
 2026-11-01 unstaked run completed 902.902646894 seconds healthy advancing replay; stock restoration 15:40:57.926541 UTC, ordinary shutdown successful, timer retired, original voter remained fenced and independent voter stayed healthy. Not caught up, not voting, not a performance comparison. See firedancer-unstaked.json for allowlisted aggregates.

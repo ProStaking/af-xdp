@@ -1,3 +1,7 @@
+# Updated voting checkpoint and proposal status
+
+Voting update 2026-11-01: one caught-up voting hour has now passed. The older readiness analysis below describes the preceding unstaked checkpoint; its “not caught up/not voting” statements are historical. Current pinned applicability and remaining work are in the separate [Firedancer proposal](firedancer-proposal-draft.md) and [Broadcom/netdev proposal](broadcom-netdev-proposal-draft.md). Neither is merge-ready or submitted.
+
 # Upstream readiness assessment
 
 Prepared 2026-11-01. Sanitized assessment based on the retained review. No publication, maintainer contact, submission, driver modification, or new experiment is authorized by this document.
