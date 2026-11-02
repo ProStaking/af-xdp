@@ -1,0 +1,160 @@
+From 02b9a11a44be4ab133b7356430554326b8dc569d Mon Sep 17 00:00:00 2001
+From: Tristan Carter <trcarterintern@jumptrading.com>
+Date: Wed, 14 Oct 2026 23:05:49 +0000
+Subject: [PATCH] net: add iavf operating book docs
+
+---
+ book/api/cli.md            | 11 +++++++++--
+ book/guide/initializing.md | 31 ++++++++++++++++++++++++++++++-
+ book/guide/networking.md   | 30 +++++++++++++++++++++++++-----
+ 3 files changed, 64 insertions(+), 8 deletions(-)
+
+diff --git a/book/api/cli.md b/book/api/cli.md
+index bbaba117e07..a5a033d7056 100644
+--- a/book/api/cli.md
++++ b/book/api/cli.md
+@@ -67,6 +67,8 @@ Configures the operating system so that it can run Firedancer. See
+ [the guide](/guide/initializing) for more information. There are the
+ following stages to each configure command:
+ 
++ - `iavf` Configures VFs, clears and installs PF ntuple rules and loads the
++    `vfio-pci` kernel module required by the iavf network provider.
+  - `mlx5` Loads the `ib_uverbs` kernel module required by the mlx5
+     network provider. Clears leftover XDP ntuple rules, resets the
+     RSS indirection table and channel count to defaults.
+@@ -119,6 +121,8 @@ and configure the number of combined channels on the network device.
+ | `root`          | disable network device tx-udp-segmentation with `ethtool --offload lo tx-udp-segmentation off`. Only applies for the `ethtool-loopback` stage |
+ | `root`          | restore network device defaults and load the `ib_uverbs` kernel module if needed |
+ | `CAP_SYS_MODULE` | load the `ib_uverbs` kernel module with `modprobe` when the uverbs interface is unavailable |
++| `root`          | configure VFs and PF ntuple rules. Only applies for the `iavf` stage |
++| `CAP_SYS_MODULE` | load the `vfio-pci` kernel module with `modprobe` when the driver is unavailable. Only applies for the `iavf` stage |
+ | `CAP_SYS_ADMIN` | set kernel parameters in `/proc/sys`. Only applies for the `sysctl` stage |
+ 
+ :::
+@@ -137,8 +141,10 @@ Remove any Firedancer specific operating system configuration still
+ lingering. The `hugetlbfs` stage unmounts its filesystems and returns the
+ reserved huge and gigantic pages to the kernel pool. The `mlx5` stage
+ clears leftover XDP ntuple rules and resets the RSS indirection table and
+-channel count to defaults. The `fini` mode does not reduce sysctls that
+-were earlier increased or restore previous network settings.
++channel count to defaults. The `iavf` stage clears PF ntuple rules and
++removes VF 0 if its PF has exactly one VF. PFs with multiple VFs retain
++all of them. The `fini` mode does not reduce sysctls that were earlier
++increased or restore previous network settings.
+ 
+ ::: details Capabilities
+ 
+@@ -146,6 +152,7 @@ were earlier increased or restore previous network settings.
+ |------------|--------|
+ | `root`     | remove directories from `/mnt`, unmount hugetlbfs. Only applies for the `hugetlbfs` stage |
+ | `root`     | restore network device defaults |
++| `root`     | clear PF ntuple rules and remove VFs. Only applies for the `iavf` stage |
+ 
+ :::
+ 
+diff --git a/book/guide/initializing.md b/book/guide/initializing.md
+index 4d28b262cad..dff4a912d87 100644
+--- a/book/guide/initializing.md
++++ b/book/guide/initializing.md
+@@ -4,6 +4,8 @@
+ The `firedancer configure` command is used to setup the host operator
+ system so Firedancer can run correctly. It does the following:
+ 
++* **iavf** Configures VFs, clears and installs PF ntuple rules and loads the
++  `vfio-pci` kernel module required by the iavf network provider.
+ * **mlx5** Loads the `ib_uverbs` kernel module required by the mlx5
+   network provider and clears network configuration left by XDP.
+ * **hugetlbfs** Reserves huge and gigantic pages for use by Firedancer.
+@@ -46,7 +48,7 @@ where `mode` is one of:
+    privileges and will not make any changes to the system.
+  - `fini` Unconfigure (reverse) the stage if it is reversible.
+ 
+-`stage` can be one or more of `mlx5`, `hugetlbfs`, `sysctl`,
++`stage` can be one or more of `iavf`, `mlx5`, `hugetlbfs`, `sysctl`,
+ `hyperthreads`, `bonding`,  `ethtool-channels`, `ethtool-offloads`,
+ `ethtool-loopback`,
+ `irq-affinity`, `irq-balance`, `kworkers`, `cpuset`, `console`, and
+@@ -59,6 +61,33 @@ trying to run the stage without privileges. The `check` mode never
+ requires privileges, and the `init` mode will only require
+ privileges if it needs to actually change something.
+ 
++## iavf
++The iavf provider uses one SR-IOV Virtual Function (VF) per Physical
++Function (PF) on `[net.interface]`. This stage only runs when `[net.provider]`
++is `iavf`. The PFs must use Intel `ice` or `i40e` drivers, SR-IOV and IOMMU
++must be enabled in the system's BIOS, with Virtualization Mode set to SR-IOV
++in the NIC's BIOS section.
++
++`init` loads the `vfio-pci` kernel module if needed, then reuses the
++highest index VF (`sriov_numvfs - 1`) or creates VF 0 if none exist. It
++binds the VF to `vfio-pci`, assigns the MAC address of `[net.interface]`
++to each VF used (this leads to all RX being sent to both the PF and VF,
++Firedancer adds drop rules on the PF so it processes less unnecessary FD packets),
++disables spoof checking and trust, and sets automatic link state. Repeated
++init does not add excess VFs.
++
++The stage clears all existing PF ntuple rules and installs UDP port based
++drop rules for Firedancer's ports so unnecessary packets are not processed
++by the normal kernel (would otherwise waste CPU resources).
++
++Changing VFs or PF filters requires root privileges. `CAP_SYS_MODULE`
++is also required when loading `vfio-pci`. If already configured, `init`
++does nothing. The `check` mode requires no privileges and makes no changes.
++
++`fini` clears PF's ntuple rules and removes VF 0 if its PF has
++exactly one VF (PFs with multiple VFs retain all of them), it does not
++unload `vfio-pci`.
++
+ ## mlx5
+ The mlx5 network provider sets up the network device through the
+ `/dev/infiniband/uverbs*` devices, which are provided by the `ib_uverbs`
+diff --git a/book/guide/networking.md b/book/guide/networking.md
+index de6f7431619..33488f66742 100644
+--- a/book/guide/networking.md
++++ b/book/guide/networking.md
+@@ -1,4 +1,4 @@
+-# Networking (XDP)
++# Networking
+ 
+ ## `xdp` network provider
+ 
+@@ -66,11 +66,25 @@ Firedancer.
+ The recommended way to capture Firedancer traffic is using the
+ `firedancer dump` subcommand.
+ 
+-### Internals
++## `iavf` network provider
+ 
+-Further documentation on network stack internals:
+-- [net tile internals](./internals/net_tile.md)
+-- [netlnk tile internals](./internals/netlink.md)
++### Virtual Functions
++
++The iavf provider uses SR-IOV Virtual Functions (VFs) to facilitate kernel
++bypass while also sharing the selected networking device with the Linux
++kernel. iavf takes control of one VF per PF (Physical Function).
++
++`configure init iavf` reuses the highest index VF (`sriov_numvfs - 1`)
++if it exists or creates VF 0 if none exist. Therefore repeated init
++does not add excess VFs.
++
++`configure fini iavf` removes a VF if its associated PF has exactly one
++VF. PFs with multiple VFs retain all of them, and iavf will reuse the
++highest index VF upon `configure init iavf`.
++
++This reuse highest index design allows other applications on the system
++to also use VFs by adding an extra VF per PF ontop of what their
++applications want, which Firedancer will then use.
+ 
+ ## `socket` network provider
+ 
+@@ -81,3 +95,9 @@ It can be enabled as follows:
+ [net]
+     provider = "socket"
+ ```
++
++### Internals
++
++Further documentation on network stack internals:
++- [net tile internals](./internals/net_tile.md)
++- [netlnk tile internals](./internals/netlink.md)

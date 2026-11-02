@@ -1,0 +1,76 @@
+{
+  "deployed_binary_sha256": "c28f3a3150d22bb7f4655a2123bd8754b62b9ea224f132c9288225a3f77f5531",
+  "clean_rebuild_sha256": "65804ae99802f3dda1ab516e4923681738f44bf9c237091510265021338ba2f8",
+  "same_sections": [
+    "",
+    ".gnu.version",
+    ".init_array",
+    ".rela.plt",
+    ".rela.dyn",
+    ".strtab",
+    ".interp",
+    ".debug_rnglists",
+    ".dynsym",
+    ".dynstr",
+    ".tbss",
+    ".debug_line",
+    ".symtab",
+    ".data.rel.ro",
+    ".shstrtab",
+    ".debug_info",
+    ".bss",
+    ".got",
+    ".init",
+    ".dynamic",
+    ".gnu.hash",
+    ".debug_abbrev",
+    ".data",
+    ".tdata",
+    ".plt",
+    ".comment",
+    ".debug_aranges",
+    ".text",
+    ".fini_array",
+    ".debug_str",
+    ".note.gnu.property",
+    ".eh_frame_hdr",
+    ".debug_line_str",
+    ".fini",
+    ".eh_frame",
+    ".note.ABI-tag",
+    ".gnu.version_r",
+    ".plt.got"
+  ],
+  "different_sections": {
+    ".rodata": {
+      "deployed": {
+        "size": 24428416,
+        "sha256": "f6fbedf53d36b37ecc905293d71ef402b87cb76cc805315f7902146d804f6ff9"
+      },
+      "rebuilt": {
+        "size": 24428416,
+        "sha256": "adcb9f7126e90e553ef5a75a719cd357875cd05f3323870391d40ecb2eb4fc19"
+      }
+    },
+    ".note.gnu.build-id": {
+      "deployed": {
+        "size": 36,
+        "sha256": "9ab8d99fc5a0454a70c2dddd16c480cc2ae83d8588c7609733a49e27e1cfb8d5"
+      },
+      "rebuilt": {
+        "size": 36,
+        "sha256": "3eec35881b960e4cc4f723d29ca6a4943bd168294fcadc44c99bedd1f061670d"
+      }
+    }
+  },
+  "common_object_count": 656,
+  "different_objects": [
+    "obj/util/log/fd_log.o",
+    "bin/firedancer.buildinfo.o"
+  ],
+  "metadata_sources": [
+    "config/everything.mk:338 embeds link date",
+    "config/everything.mk:477 embeds date, build user/hostname/path and git state into info",
+    "src/util/log/fd_log.c imports FD_BUILD_INFO"
+  ]
+}

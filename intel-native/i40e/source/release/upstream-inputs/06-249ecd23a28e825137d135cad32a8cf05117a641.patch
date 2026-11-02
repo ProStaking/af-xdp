@@ -1,0 +1,978 @@
+From 249ecd23a28e825137d135cad32a8cf05117a641 Mon Sep 17 00:00:00 2001
+From: Tristan Carter <trcarterintern@jumptrading.com>
+Date: Mon, 12 Oct 2026 20:57:42 +0000
+Subject: [PATCH] net: multi tile iavf
+
+---
+ src/app/shared/fd_config.c           |   5 +-
+ src/disco/net/fd_net_tile_topo.c     |  19 ++-
+ src/disco/net/iavf/fd_iavf.c         | 224 +++++++++++++++++----------
+ src/disco/net/iavf/fd_iavf.h         |   1 +
+ src/disco/net/iavf/fd_iavf_private.h |  41 +++--
+ src/disco/net/iavf/fd_iavf_tile.c    | 182 ++++++++++++++++------
+ src/disco/net/iavf/test_iavf_tile.c  | 115 ++++++++++++--
+ 7 files changed, 428 insertions(+), 159 deletions(-)
+
+diff --git a/src/app/shared/fd_config.c b/src/app/shared/fd_config.c
+index 1722fc63615..7bcc325616c 100644
+--- a/src/app/shared/fd_config.c
++++ b/src/app/shared/fd_config.c
+@@ -616,7 +616,10 @@ fd_config_validate( fd_config_t const * config ) {
+       FD_LOG_ERR(( "invalid iavf TX queue depth %u: must be at least %u and must not exceed %u",
+                    config->net.iavf.tx_queue_size, FD_IAVF_BATCH_SIZE, FD_IAVF_QUEUE_DEPTH_MAX ));
+     }
+-    if( FD_UNLIKELY( config->layout.net_tile_count!=1U ) ) FD_LOG_ERR(( "IAVF currently requires one net tile" ));
++    if( FD_UNLIKELY( config->layout.net_tile_count>FD_IAVF_TILE_MAX ) ) {
++      FD_LOG_ERR(( "invalid iavf net tile count %u: must be between 1 and %lu",
++                   config->layout.net_tile_count, FD_IAVF_TILE_MAX ));
++    }
+   } else if( 0==strcmp( config->net.provider, "socket" ) ) {
+     CFG_HAS_NON_ZERO( net.socket.receive_buffer_size );
+     CFG_HAS_NON_ZERO( net.socket.send_buffer_size );
+diff --git a/src/disco/net/fd_net_tile_topo.c b/src/disco/net/fd_net_tile_topo.c
+index b9068e6c2ae..589e08b24c7 100644
+--- a/src/disco/net/fd_net_tile_topo.c
++++ b/src/disco/net/fd_net_tile_topo.c
+@@ -139,6 +139,16 @@ setup_iavf_tile( fd_topo_t *             topo,
+                  ulong                   route_max,
+                  ulong                   route_peer_max ) {
+   fd_topo_tile_t * tile = fd_topob_tile( topo, "iavf", "iavf", "metric_in", tile_to_cpu[ topo->tile_cnt ], 0, 0, 0 );
++  fd_topo_tile_t const * first_tile = NULL;
++  if( 0!=tile_kind_id ) {
++    ulong first_tile_id = fd_topo_find_tile( topo, "iavf", 0UL );
++    FD_TEST( first_tile_id!=ULONG_MAX );
++    first_tile = &topo->tiles[ first_tile_id ];
++    /* Only tile 0 consumes PF link events from the VF Admin Queues.
++       The other iavf tiles copy its vf_link_usable array to track each
++       VF's link state. */
++    fd_topob_tile_uses( topo, tile, &topo->objs[ first_tile->tile_obj_id ], FD_SHMEM_JOIN_MODE_READ_ONLY );
++  }
+   fd_topob_link( topo, "net_netlnk", "net_netlnk", 128UL, 0UL, 0UL );
+   fd_topob_tile_in(  topo, "netlnk", 0UL,         "metric_in", "net_netlnk", tile_kind_id, FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED );
+   fd_topob_tile_out( topo, "iavf", tile_kind_id,               "net_netlnk", tile_kind_id );
+@@ -152,7 +162,10 @@ setup_iavf_tile( fd_topo_t *             topo,
+   FD_STATIC_ASSERT( sizeof(tile->iavf.if_name)==IF_NAMESIZE, str_bounds );
+   fd_cstr_ncpy( tile->iavf.if_name, net_cfg->interface, IF_NAMESIZE );
+ 
+-  if( FD_UNLIKELY( fd_iavf_member_interfaces( net_cfg->interface, tile->iavf.members, &tile->iavf.member_cnt ) ) ) {
++  if( first_tile!=NULL ) {
++    tile->iavf.member_cnt = first_tile->iavf.member_cnt;
++    fd_memcpy( tile->iavf.members, first_tile->iavf.members, sizeof(tile->iavf.members) );
++  } else if( FD_UNLIKELY( -1==fd_iavf_member_interfaces( net_cfg->interface, tile->iavf.members, &tile->iavf.member_cnt ) ) ) {
+     FD_LOG_ERR(( "IAVF member discovery failed (%i-%s)", errno, fd_io_strerror( errno ) ));
+   }
+ 
+@@ -360,8 +373,8 @@ fd_topos_net_tiles( fd_topo_t *             topo,
+     fd_topob_tile_out( topo, "netlnk", 0UL, "iproute_out", 0UL );
+     fd_netlink_topo_create( netlink_tile, topo, netlnk_max_routes, netlnk_max_peer_routes, netlnk_max_neighbors, net_cfg->interface );
+ 
+-    if( FD_UNLIKELY( net_tile_cnt!=1UL ) ) {
+-      FD_LOG_ERR(( "net.provider=\"iavf\" requires layout.net_tile_count to be one" ));
++    if( FD_UNLIKELY( 0==net_tile_cnt || net_tile_cnt>FD_IAVF_TILE_MAX ) ) {
++      FD_LOG_ERR(( "IAVF net tile count %lu must be in [1,%lu]", net_tile_cnt, FD_IAVF_TILE_MAX ));
+     }
+     for( ulong i=0UL; i<net_tile_cnt; i++ ) {
+       setup_iavf_tile( topo, i, netlink_tile, tile_to_cpu, net_cfg, netlnk_max_routes, netlnk_max_peer_routes );
+diff --git a/src/disco/net/iavf/fd_iavf.c b/src/disco/net/iavf/fd_iavf.c
+index 3490bf3f2d2..c68a1fe5d7f 100644
+--- a/src/disco/net/iavf/fd_iavf.c
++++ b/src/disco/net/iavf/fd_iavf.c
+@@ -241,12 +241,12 @@ struct fd_iavf_virtchnl_queue_config {
+   ushort queue_pair_cnt;
+   uint   pad;
+   /* Linux PF message validation requires space for one extra queue pair. */
+-  fd_iavf_virtchnl_queue_pair_t pairs[ 2 ];
++  fd_iavf_virtchnl_queue_pair_t pairs[ FD_IAVF_TILE_MAX+1UL ];
+ };
+ 
+ typedef struct fd_iavf_virtchnl_queue_config fd_iavf_virtchnl_queue_config_t;
+ 
+-FD_STATIC_ASSERT( sizeof(fd_iavf_virtchnl_queue_config_t)==136UL, iavf_virtchnl_queue_config_sz );
++FD_STATIC_ASSERT( sizeof(fd_iavf_virtchnl_queue_config_t)==8UL+64UL*(FD_IAVF_TILE_MAX+1UL), iavf_virtchnl_queue_config_sz );
+ 
+ /* fd_iavf_virtchnl_irq_map holds Linux virtchnl_irq_map_info and one virtchnl_vector_map. */
+ struct fd_iavf_virtchnl_irq_map {
+@@ -1734,15 +1734,18 @@ fd_iavf_queue_footprint( uint tx_depth,
+ }
+ 
+ int
+-fd_iavf_virtchnl_configure_queue( fd_iavf_vfio_t *            vfio,
+-                                  fd_iavf_adminq_t *          adminq,
+-                                  fd_iavf_vf_info_t const *   info,
+-                                  fd_iavf_vfio_tile_t const * tile,
+-                                  ulong                       dma_iova,
+-                                  uint                        rx_buffer_sz,
+-                                  uint                        max_frame_sz ) {
+-  if( FD_UNLIKELY( !info->queue_pair_cnt ) ) {
+-    FD_LOG_WARNING(( "VF has no queue pairs" ));
++fd_iavf_virtchnl_configure_queues( fd_iavf_vfio_t *            vfio,
++                                   fd_iavf_adminq_t *          adminq,
++                                   fd_iavf_vf_info_t const *   info,
++                                   fd_iavf_vfio_tile_t const * tiles,
++                                   uint                        queue_cnt,
++                                   ulong                       dma_iova,
++                                   uint                        rx_buffer_sz,
++                                   uint                        max_frame_sz ) {
++  /* Check VF queue and frame limits */
++  if( FD_UNLIKELY( queue_cnt>info->queue_pair_cnt ) ) {
++    FD_LOG_WARNING(( "VF has %hu queue pairs but %u net tiles are configured. Please decrease [layout.net_tile_count] to %hu or less",
++                     info->queue_pair_cnt, queue_cnt, info->queue_pair_cnt ));
+     errno = EINVAL;
+     return -1;
+   }
+@@ -1763,57 +1766,94 @@ fd_iavf_virtchnl_configure_queue( fd_iavf_vfio_t *            vfio,
+     return -1;
+   }
+ 
+-  if( FD_UNLIKELY( !tile->tx_queue || !tile->rx_queue || tile->tx_queue==tile->rx_queue || !tile->queue_memory ) ) {
+-    FD_LOG_WARNING(( "queue pair requires distinct non-NULL TX/RX queue state and non-NULL DMA memory" ));
+-    errno = EINVAL;
+-    return -1;
+-  }
+-  uint const tx_depth = tile->tx_queue->depth;
+-  uint const rx_depth = tile->rx_queue->depth;
+-  ulong const footprint = fd_iavf_queue_footprint( tx_depth, rx_depth );
+-  if( FD_UNLIKELY( !footprint ) ) {
+-    FD_LOG_WARNING(( "queue depths TX %u, RX %u must be powers of two in [%u,%u]", tx_depth, rx_depth, FD_IAVF_QUEUE_DEPTH_MIN, FD_IAVF_QUEUE_DEPTH_MAX ));
+-    errno = EINVAL;
+-    return -1;
+-  }
+-  if( FD_UNLIKELY( tile->queue_memory_sz<footprint || footprint>ULONG_MAX-dma_iova ) ) {
+-    FD_LOG_WARNING(( "invalid queue DMA bounds, memory size %lu, required %lu, IOVA %#lx", tile->queue_memory_sz, footprint, dma_iova ));
+-    errno = EINVAL;
+-    return -1;
++  /* Check every tile's queue memory before mapping */
++  ulong queue_iova = dma_iova;
++  for( uint i=0U; i<queue_cnt; i++ ) {
++    fd_iavf_vfio_tile_t const * tile = &tiles[i];
++    if( FD_UNLIKELY( NULL==tile->tx_queue || NULL==tile->rx_queue || tile->tx_queue==tile->rx_queue || NULL==tile->queue_memory ) ) {
++      FD_LOG_WARNING(( "queue pair %u requires distinct non-NULL TX/RX queue state and non-NULL DMA memory", i ));
++      errno = EINVAL;
++      return -1;
++    }
++    uint  tx_depth  = tile->tx_queue->depth;
++    uint  rx_depth  = tile->rx_queue->depth;
++    ulong footprint = fd_iavf_queue_footprint( tx_depth, rx_depth );
++    if( FD_UNLIKELY( 0==footprint ) ) {
++      FD_LOG_WARNING(( "queue %u depths TX %u, RX %u must be powers of two in [%u,%u]", i, tx_depth, rx_depth, FD_IAVF_QUEUE_DEPTH_MIN, FD_IAVF_QUEUE_DEPTH_MAX ));
++      errno = EINVAL;
++      return -1;
++    }
++    if( FD_UNLIKELY( tile->queue_memory_sz<footprint || footprint>ULONG_MAX-queue_iova ) ) {
++      FD_LOG_WARNING(( "invalid queue %u DMA bounds, memory size %lu, required %lu, IOVA %#lx", i, tile->queue_memory_sz, footprint, queue_iova ));
++      errno = EINVAL;
++      return -1;
++    }
++    queue_iova += footprint;
+   }
+ 
+-  ulong const tx_ring_sz = fd_ulong_align_up( (ulong)tx_depth*sizeof(fd_iavf_tx_desc_t), FD_IAVF_PAGE_SZ );
+-  ulong const rx_ring_sz = fd_ulong_align_up( (ulong)rx_depth*sizeof(fd_iavf_hw_rx_desc_t), FD_IAVF_PAGE_SZ );
+-  if( FD_UNLIKELY( fd_iavf_vfio_dma_map( vfio, tile->queue_memory, footprint, dma_iova ) ) ) return -1;
+-  fd_memset( tile->queue_memory, 0, footprint );
+-  *tile->tx_queue = (fd_iavf_queue_t) {
+-    .ring      = tile->queue_memory,
+-    .depth     = tx_depth,
+-    .tail      = (volatile uint *)(vfio->bar0 + FD_IAVF_TX_TAIL( 0U )),
+-    .comp_ring = (ulong *)((uchar *)tile->queue_memory + tx_ring_sz + rx_ring_sz)
+-  };
+-  *tile->rx_queue = (fd_iavf_queue_t) {
+-    .ring  = (uchar *)tile->queue_memory + tx_ring_sz,
+-    .depth = rx_depth,
+-    .tail  = (volatile uint *)(vfio->bar0 + FD_IAVF_RX_TAIL( 0U ))
+-  };
+-  fd_iavf_virtchnl_queue_config_t config = { .vsi_id=info->vsi_id, .queue_pair_cnt=1U };
+-  config.pairs[0].tx = (fd_iavf_virtchnl_txq_info_t) {
+-    .vsi_id=info->vsi_id, .queue_id=0U, .ring_len=(ushort)tx_depth, .ring_iova=dma_iova
+-  };
+-  /* Without flexible RX descriptor negotiation, the PF uses the 32-byte base format */
+-  config.pairs[0].rx = (fd_iavf_virtchnl_rxq_info_t) {
+-    .vsi_id=info->vsi_id, .queue_id=0U, .ring_len=rx_depth,
+-    .data_buffer_sz=rx_buffer_sz, .max_frame_sz=max_frame_sz, .ring_iova=dma_iova+tx_ring_sz
++  /* Map tile queues at consecutive IOVAs, queue IDs match tile indices */
++  fd_iavf_virtchnl_queue_config_t config = {
++    .vsi_id         = info->vsi_id,
++    .queue_pair_cnt = (ushort)queue_cnt
+   };
++  queue_iova = dma_iova;
++  for( uint i=0U; i<queue_cnt; i++ ) {
++    fd_iavf_vfio_tile_t const * tile = &tiles[i];
++    uint  tx_depth   = tile->tx_queue->depth;
++    uint  rx_depth   = tile->rx_queue->depth;
++    ulong tx_ring_sz = fd_ulong_align_up( (ulong)tx_depth*sizeof(fd_iavf_tx_desc_t), FD_IAVF_PAGE_SZ );
++    ulong rx_ring_sz = fd_ulong_align_up( (ulong)rx_depth*sizeof(fd_iavf_hw_rx_desc_t), FD_IAVF_PAGE_SZ );
++    ulong tx_comp_sz = fd_ulong_align_up( (ulong)tx_depth*sizeof(ulong), FD_IAVF_PAGE_SZ );
++    ulong footprint  = tx_ring_sz + rx_ring_sz + tx_comp_sz;
++    if( FD_UNLIKELY( -1==fd_iavf_vfio_dma_map( vfio, tile->queue_memory, footprint, queue_iova ) ) ) return -1;
++    fd_memset( tile->queue_memory, 0, footprint );
++    *tile->tx_queue = (fd_iavf_queue_t) {
++      .ring      = tile->queue_memory,
++      .depth     = tx_depth,
++      .tail      = (volatile uint *)(vfio->bar0 + FD_IAVF_TX_TAIL( i )),
++      .comp_ring = (ulong *)((uchar *)tile->queue_memory + tx_ring_sz + rx_ring_sz)
++    };
++    *tile->rx_queue = (fd_iavf_queue_t) {
++      .ring  = (uchar *)tile->queue_memory + tx_ring_sz,
++      .depth = rx_depth,
++      .tail  = (volatile uint *)(vfio->bar0 + FD_IAVF_RX_TAIL( i ))
++    };
++    config.pairs[i].tx = (fd_iavf_virtchnl_txq_info_t) {
++      .vsi_id    = info->vsi_id,
++      .queue_id  = (ushort)i,
++      .ring_len  = (ushort)tx_depth,
++      .ring_iova = queue_iova
++    };
++    /* Without flexible RX descriptor negotiation, the PF uses the 32-byte base format */
++    config.pairs[i].rx = (fd_iavf_virtchnl_rxq_info_t) {
++      .vsi_id         = info->vsi_id,
++      .queue_id       = (ushort)i,
++      .ring_len       = rx_depth,
++      .data_buffer_sz = rx_buffer_sz,
++      .max_frame_sz   = max_frame_sz,
++      .ring_iova      = queue_iova + tx_ring_sz
++    };
++    queue_iova += footprint;
++  }
++
++  /* Include the unused queue-pair entry required by Linux PF validation */
++  ulong config_sz = offsetof(fd_iavf_virtchnl_queue_config_t, pairs) +
++                    ((ulong)queue_cnt+1UL)*sizeof(fd_iavf_virtchnl_queue_pair_t);
+   ulong response_sz = 0UL;
+   if( FD_UNLIKELY( -1==fd_iavf_virtchnl_request( vfio, adminq, FD_IAVF_VIRTCHNL_CONFIG_QUEUES,
+-                                             &config, sizeof(config), NULL, &response_sz ) ) ) return -1;
++                                                 &config, config_sz, NULL, &response_sz ) ) ) return -1;
+ 
+   /* Virtchnl requires queue interrupt mappings even when polling
+      Vector 0 is reserved for Admin Queue events */
++  ushort queue_map = (ushort)((1U<<queue_cnt)-1U);
+   fd_iavf_virtchnl_irq_map_t irq_map = {
+-    .vector_cnt=1U, .vsi_id=info->vsi_id, .vector_id=1U, .rx_queue_map=1U, .tx_queue_map=1U
++    .vector_cnt   = 1U,
++    .vsi_id       = info->vsi_id,
++    .vector_id    = 1U,
++    .rx_queue_map = queue_map,
++    .tx_queue_map = queue_map,
++    .rx_itr_idx   = 0U,
++    .tx_itr_idx   = 0U
+   };
+   response_sz = 0UL;
+   if( FD_UNLIKELY( -1==fd_iavf_virtchnl_request( vfio, adminq, FD_IAVF_VIRTCHNL_CONFIG_IRQ_MAP,
+@@ -1830,31 +1870,42 @@ fd_iavf_virtchnl_configure_queue( fd_iavf_vfio_t *            vfio,
+ }
+ 
+ int
+-fd_iavf_virtchnl_enable_queue( fd_iavf_vfio_t *            vfio,
+-                               fd_iavf_adminq_t *          adminq,
+-                               fd_iavf_vf_info_t *         info,
+-                               fd_iavf_vfio_tile_t const * tile ) {
+-  if( FD_UNLIKELY( !vfio || !adminq || !info || !tile || !info->queue_pair_cnt ) ) {
++fd_iavf_virtchnl_enable_queues( fd_iavf_vfio_t *            vfio,
++                                fd_iavf_adminq_t *          adminq,
++                                fd_iavf_vf_info_t *         info,
++                                fd_iavf_vfio_tile_t const * tiles,
++                                uint                        queue_cnt ) {
++  if( FD_UNLIKELY( NULL==vfio || NULL==adminq || NULL==info || NULL==tiles ||
++                   0==queue_cnt || queue_cnt>FD_IAVF_TILE_MAX || queue_cnt>info->queue_pair_cnt ) ) {
+     errno = EINVAL;
+     return -1;
+   }
+-  fd_iavf_queue_t * tx_queue = tile->tx_queue;
+-  fd_iavf_queue_t * rx_queue = tile->rx_queue;
+   /* Post RX buffers before enabling reception on the VF */
+-  if( FD_UNLIKELY( !tx_queue || !rx_queue || tx_queue==rx_queue ||
+-                   tx_queue->enabled || rx_queue->enabled || !rx_queue->posted ||
+-                   rx_queue->posted!=rx_queue->prod ||
+-                   rx_queue->prod-rx_queue->cons>=rx_queue->depth ) ) {
+-    FD_LOG_WARNING(( "queue pair must have distinct disabled TX/RX queues and posted RX buffers below ring capacity" ));
+-    errno = EINVAL;
+-    return -1;
++  for( uint i=0U; i<queue_cnt; i++ ) {
++    fd_iavf_queue_t const * tx_queue = tiles[i].tx_queue;
++    fd_iavf_queue_t const * rx_queue = tiles[i].rx_queue;
++    if( FD_UNLIKELY( NULL==tx_queue || NULL==rx_queue || tx_queue==rx_queue ||
++                     tx_queue->enabled || rx_queue->enabled || 0==rx_queue->posted ||
++                     rx_queue->posted!=rx_queue->prod ||
++                     rx_queue->prod-rx_queue->cons>=rx_queue->depth ) ) {
++      FD_LOG_WARNING(( "queue pair %u must have distinct disabled TX/RX queues and posted RX buffers below ring capacity", i ));
++      errno = EINVAL;
++      return -1;
++    }
+   }
+-  fd_iavf_virtchnl_queue_select_t select = { .vsi_id=info->vsi_id, .rx_queue_map=1U, .tx_queue_map=1U };
++  uint queue_map = (1U<<queue_cnt)-1U;
++  fd_iavf_virtchnl_queue_select_t select = {
++    .vsi_id       = info->vsi_id,
++    .rx_queue_map = queue_map,
++    .tx_queue_map = queue_map
++  };
+   ulong response_sz = 0UL;
+   if( FD_UNLIKELY( -1==fd_iavf_virtchnl_request( vfio, adminq, FD_IAVF_VIRTCHNL_ENABLE_QUEUES,
+                                                  &select, sizeof(select), NULL, &response_sz ) ) ) return -1;
+-  tx_queue->enabled = 1;
+-  rx_queue->enabled = 1;
++  for( uint i=0U; i<queue_cnt; i++ ) {
++    tiles[i].tx_queue->enabled = 1;
++    tiles[i].rx_queue->enabled = 1;
++  }
+ 
+   /* Queue enable triggers a new PF link report */
+   info->link_usable = 0;
+@@ -1902,7 +1953,7 @@ fd_iavf_virtchnl_configure_rss( fd_iavf_vfio_t *          vfio,
+                                                  &request, FD_IAVF_RSS_KEY_LEGACY_SZ+(ulong)info->rss_key_sz-1UL,
+                                                  NULL, &response_sz ) ) ) return -1;
+ 
+-  /* Map RSS entries to the configured queue */
++  /* Cycle queue IDs through the LUT, tile count need not be a power of two */
+   fd_memset( request.bytes, 0, sizeof(request.bytes) );
+   request.count = (ushort)info->rss_lut_sz;
+   for( uint i=0U; i<info->rss_lut_sz; i++ ) request.bytes[i] = (uchar)(i%queue_cnt);
+@@ -1916,21 +1967,26 @@ int
+ fd_iavf_init( fd_iavf_vfio_t *            vfio,
+               fd_iavf_adminq_t *          adminq,
+               fd_iavf_vf_info_t *         info,
+-              fd_iavf_vfio_tile_t const * tile,
++              fd_iavf_vfio_tile_t const * tiles,
++              uint                        tile_cnt,
+               char const *                pci_addr,
+               uint                        rx_buffer_sz,
+               uint                        max_frame_sz ) {
+-  if( FD_UNLIKELY( !vfio || !adminq || !info || !tile ) ) {
++  if( FD_UNLIKELY( NULL==vfio || NULL==adminq || NULL==info || NULL==tiles || 0==tile_cnt || tile_cnt>FD_IAVF_TILE_MAX ) ) {
+     errno = EINVAL;
+     return -1;
+   }
+ 
+   /* Place Admin Queue and queue IOVAs after packet mappings to avoid overlap */
+-  if( FD_UNLIKELY( tile->packet_memory_sz>ULONG_MAX-tile->packet_iova ) ) {
+-    errno = EINVAL;
+-    return -1;
++  ulong adminq_iova = 0UL;
++  for( uint tile_idx=0U; tile_idx<tile_cnt; tile_idx++ ) {
++    fd_iavf_vfio_tile_t const * tile = &tiles[tile_idx];
++    if( FD_UNLIKELY( tile->packet_memory_sz>ULONG_MAX-tile->packet_iova ) ) {
++      errno = EINVAL;
++      return -1;
++    }
++    adminq_iova = fd_ulong_max( adminq_iova, tile->packet_iova+tile->packet_memory_sz );
+   }
+-  ulong const adminq_iova = tile->packet_iova+tile->packet_memory_sz;
+   ulong const adminq_memory_sz = fd_iavf_adminq_footprint();
+   if( FD_UNLIKELY( adminq_memory_sz>ULONG_MAX-adminq_iova ) ) {
+     errno = EINVAL;
+@@ -1948,12 +2004,16 @@ fd_iavf_init( fd_iavf_vfio_t *            vfio,
+   if( FD_UNLIKELY( -1==fd_iavf_virtchnl_version( vfio, adminq ) ) ) return -1;
+   if( FD_UNLIKELY( -1==fd_iavf_virtchnl_get_resources( vfio, adminq, info ) ) ) return -1;
+ 
+-  /* Configure the queue pair and receive delivery */
+-  if( FD_UNLIKELY( fd_iavf_virtchnl_configure_queue( vfio, adminq, info, tile,
+-                                                    queue_iova, rx_buffer_sz, max_frame_sz ) ) ) return -1;
++  /* Configure tile queues and receive delivery */
++  if( FD_UNLIKELY( -1==fd_iavf_virtchnl_configure_queues( vfio, adminq, info, tiles, tile_cnt,
++                                                          queue_iova, rx_buffer_sz, max_frame_sz ) ) ) return -1;
+   if( FD_UNLIKELY( -1==fd_iavf_virtchnl_add_mac( vfio, adminq, info ) ) ) return -1;
+-  if( FD_UNLIKELY( fd_iavf_virtchnl_configure_rss( vfio, adminq, info, 1U ) ) ) return -1;
++  if( FD_UNLIKELY( -1==fd_iavf_virtchnl_configure_rss( vfio, adminq, info, tile_cnt ) ) ) return -1;
+ 
+   /* Map packet buffers before the caller posts RX buffers and enables queues */
+-  return fd_iavf_vfio_dma_map( vfio, tile->packet_memory, tile->packet_memory_sz, tile->packet_iova );
++  for( uint tile_idx=0U; tile_idx<tile_cnt; tile_idx++ ) {
++    fd_iavf_vfio_tile_t const * tile = &tiles[tile_idx];
++    if( FD_UNLIKELY( -1==fd_iavf_vfio_dma_map( vfio, tile->packet_memory, tile->packet_memory_sz, tile->packet_iova ) ) ) return -1;
++  }
++  return 0;
+ }
+diff --git a/src/disco/net/iavf/fd_iavf.h b/src/disco/net/iavf/fd_iavf.h
+index 801dd1fcade..d324d026588 100644
+--- a/src/disco/net/iavf/fd_iavf.h
++++ b/src/disco/net/iavf/fd_iavf.h
+@@ -11,6 +11,7 @@
+ #define FD_IAVF_PCI_ADDR_SZ     (13UL)
+ #define FD_IAVF_DRIVER_NAME_MAX (32UL)
+ #define FD_IAVF_MEMBER_MAX      (16UL)
++#define FD_IAVF_TILE_MAX        (8UL)
+ 
+ /* fd_iavf_pci_info describes a validated Intel Ethernet Virtual Function. */
+ struct fd_iavf_pci_info {
+diff --git a/src/disco/net/iavf/fd_iavf_private.h b/src/disco/net/iavf/fd_iavf_private.h
+index a6c2531fea5..f84aa3f6a48 100644
+--- a/src/disco/net/iavf/fd_iavf_private.h
++++ b/src/disco/net/iavf/fd_iavf_private.h
+@@ -107,7 +107,7 @@ struct fd_iavf_queue {
+ typedef struct fd_iavf_queue fd_iavf_queue_t;
+ 
+ /* fd_iavf_vfio_tile identifies one tile's queues and packet memory during
+-   VF initialization. Queue depths must be set before initialization. */
++   shared VF initialization. Queue depths must be set before initialization. */
+ struct fd_iavf_vfio_tile {
+   fd_iavf_queue_t * tx_queue;
+   fd_iavf_queue_t * rx_queue;
+@@ -121,16 +121,17 @@ typedef struct fd_iavf_vfio_tile fd_iavf_vfio_tile_t;
+ 
+ FD_PROTOTYPES_BEGIN
+ 
+-/* fd_iavf_init opens and resets a VF, negotiates PF resources, maps the
++/* fd_iavf_init opens and resets a VF, negotiates PF resources, maps each
+    tile's memory and configures queues, MAC delivery and RSS. adminq->dma_memory
+    must hold fd_iavf_adminq_footprint() bytes. Queues remain disabled so callers
+-   can post RX buffers before fd_iavf_virtchnl_enable_queue. Returns 0 on
++   can post RX buffers before fd_iavf_virtchnl_enable_queues. Returns 0 on
+    success or -1 with errno set. After failure, the caller must exit. */
+ int
+ fd_iavf_init( fd_iavf_vfio_t *            vfio,
+               fd_iavf_adminq_t *          adminq,
+               fd_iavf_vf_info_t *         info,
+-              fd_iavf_vfio_tile_t const * tile,
++              fd_iavf_vfio_tile_t const * tiles,
++              uint                        tile_cnt,
+               char const *                pci_addr,
+               uint                        rx_buffer_sz,
+               uint                        max_frame_sz );
+@@ -186,22 +187,28 @@ ulong
+ fd_iavf_queue_footprint( uint tx_depth,
+                          uint rx_depth );
+ 
+-/* fd_iavf_virtchnl_configure_queue maps and configures one queue pair.
+-   It remains disabled until fd_iavf_virtchnl_enable_queue succeeds. */
++/* fd_iavf_virtchnl_configure_queues prepares queue pairs 0 through queue_cnt-1
++   for independent tile ownership. Requires initialized VFIO and Admin Queue
++   state, validated info and queue_cnt in [1,FD_IAVF_TILE_MAX].
++   Each tile must provide distinct queue memory and queue state.
++   Maps pairs at consecutive IOVAs starting at dma_iova and
++   leaves them disabled until fd_iavf_virtchnl_enable_queues. */
+ int
+-fd_iavf_virtchnl_configure_queue( fd_iavf_vfio_t *            vfio,
+-                                  fd_iavf_adminq_t *          adminq,
+-                                  fd_iavf_vf_info_t const *   info,
+-                                  fd_iavf_vfio_tile_t const * tile,
+-                                  ulong                       dma_iova,
+-                                  uint                        rx_buffer_sz,
+-                                  uint                        max_frame_sz );
++fd_iavf_virtchnl_configure_queues( fd_iavf_vfio_t *            vfio,
++                                   fd_iavf_adminq_t *          adminq,
++                                   fd_iavf_vf_info_t const *   info,
++                                   fd_iavf_vfio_tile_t const * tiles,
++                                   uint                        queue_cnt,
++                                   ulong                       dma_iova,
++                                   uint                        rx_buffer_sz,
++                                   uint                        max_frame_sz );
+ 
+ int
+-fd_iavf_virtchnl_enable_queue( fd_iavf_vfio_t *            vfio,
+-                               fd_iavf_adminq_t *          adminq,
+-                               fd_iavf_vf_info_t *         info,
+-                               fd_iavf_vfio_tile_t const * tile );
++fd_iavf_virtchnl_enable_queues( fd_iavf_vfio_t *            vfio,
++                                fd_iavf_adminq_t *          adminq,
++                                fd_iavf_vf_info_t *         info,
++                                fd_iavf_vfio_tile_t const * tiles,
++                                uint                        queue_cnt );
+ 
+ FD_PROTOTYPES_END
+ #endif
+diff --git a/src/disco/net/iavf/fd_iavf_tile.c b/src/disco/net/iavf/fd_iavf_tile.c
+index fb1b79e7e15..4103a423433 100644
+--- a/src/disco/net/iavf/fd_iavf_tile.c
++++ b/src/disco/net/iavf/fd_iavf_tile.c
+@@ -4,7 +4,7 @@
+    completions written into the descriptor rings themselves.
+ 
+    Separate Admin Queues carry configuration requests to the PF driver.
+-   The tile consumes PF events during housekeeping. */
++   Tile 0 consumes PF events for all tiles. */
+ 
+ #include "../fd_net_tile.h"
+ #include "../fd_net_tile_private.h"
+@@ -78,6 +78,9 @@ struct __attribute__((aligned(64UL))) fd_iavf_tile {
+   ulong                 vf_cnt;
+   ulong                 tx_vf_idx;
+   ulong                 rx_next_vf;
++  /* vf_link_usable shares tile 0's PF link decision with the other tiles. */
++  ulong                 vf_link_usable[ FD_IAVF_MEMBER_MAX ];
++  ulong const *         vf_link_usable_shared;
+   long                  vf_housekeeping_interval_ticks;
+   long                  vf_housekeeping_deadline_ticks;
+   uint                  prepared;
+@@ -117,7 +120,11 @@ fd_iavf_hw_join_queues( fd_iavf_tile_t *       ctx,
+ 
+   for( ulong vf_idx=0UL; vf_idx<tile->iavf.member_cnt; vf_idx++ ) {
+     fd_iavf_tile_vf_t * vf = &ctx->vfs[vf_idx];
+-    vf->adminq.dma_memory = FD_SCRATCH_ALLOC_APPEND( scratch, FD_IAVF_PAGE_SZ, fd_iavf_adminq_footprint() );
++    /* Only tile 0 needs Admin Queue memory */
++    vf->adminq.dma_memory = NULL;
++    if( 0==tile->kind_id ) {
++      vf->adminq.dma_memory = FD_SCRATCH_ALLOC_APPEND( scratch, FD_IAVF_PAGE_SZ, fd_iavf_adminq_footprint() );
++    }
+ 
+     vf->queue_memory       = FD_SCRATCH_ALLOC_APPEND( scratch, FD_IAVF_PAGE_SZ, queue_sz );
+     vf->tx_queue.ring      = vf->queue_memory;
+@@ -444,7 +451,23 @@ before_frag( fd_iavf_tile_t * ctx,
+   if( FD_UNLIKELY( dst_proto!=DST_PROTO_OUTGOING ) ) return 1;
+ 
+   ulong const hash       = fd_disco_netmux_sig_hash( sig );
++  ulong       target_idx = hash % ctx->net.tile_cnt;
++  ulong const kind_id    = ctx->net.kind_id;
++  if( 0!=kind_id && kind_id!=target_idx ) return 1;
++
+   uint const dst_ip = fd_disco_netmux_sig_ip( sig );
++  if( kind_id!=target_idx ) {
++    /* Tile 0 probes for loopback without counting another tile's route failures. */
++    fd_fib4_hop_t hop[2];
++    hop[0] = fd_fib4_lookup( ctx->router.fib_local, dst_ip, 0UL );
++    hop[1] = fd_fib4_lookup( ctx->router.fib_main,  dst_ip, 0UL );
++    fd_fib4_hop_t const * next_hop = fd_fib4_hop_or( hop+0, hop+1 );
++    if( next_hop->rtype!=FD_FIB4_RTYPE_LOCAL && next_hop->rtype!=FD_FIB4_RTYPE_UNICAST ) return 1;
++    uint const if_idx = next_hop->rtype==FD_FIB4_RTYPE_LOCAL ? 1U : next_hop->if_idx;
++    fd_netdev_t const * netdev = fd_netdev_tbl_query( &ctx->router.netdev_tbl, if_idx );
++    if( NULL==netdev || netdev->dev_type!=ARPHRD_LOOPBACK ) return 1;
++  }
++
+   fd_net_tx_route_t * route  = &ctx->net.tx_route;
+   if( FD_UNLIKELY( !fd_net_tx_route( &ctx->router, &ctx->net, dst_ip, route ) ) ) return 1;
+   if( FD_UNLIKELY( route->use_gre ) ) {
+@@ -470,6 +493,9 @@ before_frag( fd_iavf_tile_t * ctx,
+     route->use_gre          = 1U;
+   }
+ 
++  if( route->use_loopback ) target_idx = 0UL;
++  if( kind_id!=target_idx ) return 1;
++
+   ctx->tx_vf_idx = route->use_loopback ? 0UL : fd_iavf_tile_select_tx_vf( ctx, hash );
+   if( FD_UNLIKELY( ctx->tx_vf_idx==ULONG_MAX ) ) {
+     ctx->metrics.tx_no_link_cnt++;
+@@ -634,13 +660,29 @@ metrics_write( fd_iavf_tile_t * ctx ) {
+   FD_MGAUGE_SET( IAVF, TX_BUFFER_FREE,         tx_buffer_idle_cnt                     );
+ }
+ 
++static inline void
++fd_iavf_tile_publish_vf_link( fd_iavf_tile_t * ctx,
++                              ulong            vf_idx ) {
++  ulong const usable = (ulong)ctx->vfs[vf_idx].vf_info.link_usable;
++  __atomic_store_n( &ctx->vf_link_usable[vf_idx], usable, __ATOMIC_RELEASE );
++}
++
+ static inline void
+ fd_iavf_tile_vf_housekeeping( fd_iavf_tile_t * ctx ) {
++  /* Other tiles read tile 0's link decisions */
++  if( 0!=ctx->net.kind_id ) {
++    for( ulong vf_idx=0UL; vf_idx<ctx->vf_cnt; vf_idx++ ) {
++      ctx->vfs[vf_idx].vf_info.link_usable = (int)__atomic_load_n( &ctx->vf_link_usable_shared[vf_idx], __ATOMIC_ACQUIRE );
++    }
++    return;
++  }
++
+   /* There is no need to check VF state on every housekeeping pass */
+   long const now = fd_tickcount();
+   if( FD_LIKELY( now<ctx->vf_housekeeping_deadline_ticks ) ) return;
+   ctx->vf_housekeeping_deadline_ticks = now+ctx->vf_housekeeping_interval_ticks;
+ 
++  /* Only tile 0 consumes PF events */
+   for( ulong vf_idx=0UL; vf_idx<ctx->vf_cnt; vf_idx++ ) {
+     fd_iavf_tile_vf_t * vf = &ctx->vfs[vf_idx];
+     int changed;
+@@ -648,6 +690,7 @@ fd_iavf_tile_vf_housekeeping( fd_iavf_tile_t * ctx ) {
+       FD_LOG_ERR(( "PF member %lu VF link event or reset failure (%i-%s)", vf_idx, errno, fd_io_strerror( errno ) ));
+     }
+     if( changed ) {
++      fd_iavf_tile_publish_vf_link( ctx, vf_idx );
+       FD_LOG_INFO(( "PF member %lu VF link %s", vf_idx, vf->vf_info.link_usable ? "up" : "down" ));
+     }
+   }
+@@ -710,7 +753,7 @@ scratch_footprint( fd_topo_tile_t const * tile ) {
+   ulong layout = FD_LAYOUT_INIT;
+   layout       = FD_LAYOUT_APPEND( layout, alignof(fd_iavf_tile_t), sizeof(fd_iavf_tile_t) );
+   for( ulong i=0UL; i<tile->iavf.member_cnt; i++ ) {
+-    layout = FD_LAYOUT_APPEND( layout, FD_IAVF_PAGE_SZ, fd_iavf_adminq_footprint() );
++    if( 0==tile->kind_id ) layout = FD_LAYOUT_APPEND( layout, FD_IAVF_PAGE_SZ, fd_iavf_adminq_footprint() );
+     layout = FD_LAYOUT_APPEND( layout, FD_IAVF_PAGE_SZ, queue_sz                                );
+     layout = FD_LAYOUT_APPEND( layout, alignof(uint),   tile->iavf.rx_queue_size*sizeof(uint)   );
+     layout = FD_LAYOUT_APPEND( layout, alignof(uint),   tile->iavf.tx_queue_size*sizeof(uint)   );
+@@ -731,7 +774,7 @@ fd_iavf_tile_fib4_join( fd_fib4_t *            out,
+   (void)FD_SCRATCH_ALLOC_APPEND( scratch, alignof(fd_iavf_tile_t), sizeof(fd_iavf_tile_t) );
+   ulong queue_sz = fd_iavf_queue_footprint( tile->iavf.tx_queue_size, tile->iavf.rx_queue_size );
+   for( ulong i=0UL; i<tile->iavf.member_cnt; i++ ) {
+-    (void)FD_SCRATCH_ALLOC_APPEND( scratch, FD_IAVF_PAGE_SZ, fd_iavf_adminq_footprint() );
++    if( 0==tile->kind_id ) (void)FD_SCRATCH_ALLOC_APPEND( scratch, FD_IAVF_PAGE_SZ, fd_iavf_adminq_footprint() );
+     (void)FD_SCRATCH_ALLOC_APPEND( scratch, FD_IAVF_PAGE_SZ, queue_sz                                );
+     (void)FD_SCRATCH_ALLOC_APPEND( scratch, alignof(uint),   tile->iavf.rx_queue_size*sizeof(uint)   );
+     (void)FD_SCRATCH_ALLOC_APPEND( scratch, alignof(uint),   tile->iavf.tx_queue_size*sizeof(uint)   );
+@@ -831,67 +874,108 @@ fd_iavf_tile_join_obj_workspace( fd_topo_t * topo,
+ void
+ fd_topo_install_iavf( fd_topo_t *     topo,
+                       fd_iavf_fds_t * fds ) {
+-  if( FD_UNLIKELY( fd_topo_tile_name_cnt( topo, "iavf" )!=1UL ) ) FD_LOG_ERR(( "IAVF currently requires one net tile" ));
+-  ulong const tile_id = fd_topo_find_tile( topo, "iavf", 0UL );
+-  FD_TEST( tile_id!=ULONG_MAX );
+-  fd_topo_tile_t const * tile = &topo->tiles[tile_id];
+-  fd_iavf_tile_join_obj_workspace( topo, tile->tile_obj_id );
+-  fd_iavf_tile_join_obj_workspace( topo, tile->net.umem_dcache_obj_id );
+-  for( ulong out_idx=0UL; out_idx<tile->out_cnt; out_idx++ ) {
+-    fd_iavf_tile_join_obj_workspace( topo, topo->links[ tile->out_link_id[out_idx] ].mcache_obj_id );
++  ulong const tile_cnt = fd_topo_tile_name_cnt( topo, "iavf" );
++  if( FD_UNLIKELY( 0==tile_cnt || tile_cnt>FD_IAVF_TILE_MAX ) ) {
++    FD_LOG_ERR(( "IAVF net tile count %lu must be in [1,%lu]", tile_cnt, FD_IAVF_TILE_MAX ));
+   }
+-  fd_iavf_tile_t * ctx = fd_topo_obj_laddr( topo, tile->tile_obj_id );
+-  fd_memset( ctx, 0, sizeof(*ctx) );
+-  ctx->vf_cnt       = tile->iavf.member_cnt;
+-  ctx->batch_size   = FD_IAVF_BATCH_SIZE;
+-  ctx->net.tile_cnt = 1UL;
+-  fd_iavf_hw_join_queues( ctx, tile );
+-  void * packet_memory;
+-  ulong  packet_memory_sz;
+-  ulong  packet_iova;
+-  fd_iavf_tile_join_pkt_bufs( topo, tile, ctx, &packet_memory, &packet_memory_sz, &packet_iova );
+-  fd_net_rx_dst_ports_init( &ctx->net, topo, tile );
+-  fd_iavf_vfio_tile_t queues[ FD_IAVF_MEMBER_MAX ];
+-  for( ulong vf_idx=0UL; vf_idx<ctx->vf_cnt; vf_idx++ ) {
+-    fd_iavf_tile_vf_t * vf = &ctx->vfs[vf_idx];
+-    queues[vf_idx] = (fd_iavf_vfio_tile_t) {
+-      .tx_queue=&vf->tx_queue, .rx_queue=&vf->rx_queue,
+-      .queue_memory=vf->queue_memory,
+-      .queue_memory_sz=fd_iavf_queue_footprint( vf->tx_queue.depth, vf->rx_queue.depth ),
+-      .packet_memory=packet_memory, .packet_memory_sz=packet_memory_sz, .packet_iova=packet_iova
+-    };
+-    char const * pf_if = tile->iavf.members[vf_idx];
++  fd_iavf_tile_t *       ctxs  [ FD_IAVF_TILE_MAX ];
++  fd_topo_tile_t const * tiles [ FD_IAVF_TILE_MAX ];
++  fd_iavf_vfio_tile_t    queues[ FD_IAVF_MEMBER_MAX ][ FD_IAVF_TILE_MAX ];
++
++  /* Prepare tile memory and collect queue pairs by VF */
++  for( ulong tile_idx=0UL; tile_idx<tile_cnt; tile_idx++ ) {
++    ulong const tile_id = fd_topo_find_tile( topo, "iavf", tile_idx );
++    FD_TEST( tile_id!=ULONG_MAX );
++    fd_topo_tile_t const * tile = &topo->tiles[tile_id];
++    tiles[tile_idx] = tile;
++
++    fd_iavf_tile_join_obj_workspace( topo, tile->tile_obj_id );
++    fd_iavf_tile_join_obj_workspace( topo, tile->net.umem_dcache_obj_id );
++    for( ulong out_idx=0UL; out_idx<tile->out_cnt; out_idx++ ) {
++      fd_iavf_tile_join_obj_workspace( topo, topo->links[ tile->out_link_id[out_idx] ].mcache_obj_id );
++    }
++    fd_iavf_tile_t * ctx = fd_topo_obj_laddr( topo, tile->tile_obj_id );
++    ctxs[tile_idx] = ctx;
++    fd_memset( ctx, 0, sizeof(*ctx) );
++    ctx->vf_cnt                = tile->iavf.member_cnt;
++    ctx->batch_size            = FD_IAVF_BATCH_SIZE;
++    ctx->net.kind_id           = tile_idx;
++    ctx->net.tile_cnt          = tile_cnt;
++    ctx->vf_link_usable_shared = ctxs[0]->vf_link_usable;
++    fd_iavf_hw_join_queues( ctx, tile );
++
++    void * packet_memory;
++    ulong  packet_memory_sz;
++    ulong  packet_iova;
++    fd_iavf_tile_join_pkt_bufs( topo, tile, ctx, &packet_memory, &packet_memory_sz, &packet_iova );
++    for( ulong vf_idx=0UL; vf_idx<ctx->vf_cnt; vf_idx++ ) {
++      fd_iavf_tile_vf_t * vf = &ctx->vfs[vf_idx];
++      queues[vf_idx][tile_idx] = (fd_iavf_vfio_tile_t) {
++        .tx_queue         = &vf->tx_queue,
++        .rx_queue         = &vf->rx_queue,
++        .queue_memory     = vf->queue_memory,
++        .queue_memory_sz  = fd_iavf_queue_footprint( vf->tx_queue.depth, vf->rx_queue.depth ),
++        .packet_memory    = packet_memory,
++        .packet_memory_sz = packet_memory_sz,
++        .packet_iova      = packet_iova
++      };
++    }
++    fd_net_rx_dst_ports_init( &ctx->net, topo, tile );
++  }
++
++  /* Configure VFs through tile 0's Admin Queues */
++  fd_topo_tile_t const * first_tile = tiles[0];
++  fd_iavf_tile_t *       owner      = ctxs[0];
++  for( ulong vf_idx=0UL; vf_idx<owner->vf_cnt; vf_idx++ ) {
++    fd_iavf_tile_vf_t * vf = &owner->vfs[vf_idx];
++    char const * pf_if = first_tile->iavf.members[vf_idx];
+     char vf_pci[ FD_IAVF_PCI_ADDR_SZ ];
+     if( FD_UNLIKELY( -1==fd_iavf_get_last_vf( pf_if, NULL, vf_pci ) ) ) {
+       FD_LOG_ERR(( "VF lookup for PF %s failed (%i-%s)", pf_if, errno, fd_io_strerror( errno ) ));
+     }
+     if( FD_UNLIKELY( -1==fd_iavf_init( &vf->vfio, &vf->adminq, &vf->vf_info,
+-                                   &queues[vf_idx], vf_pci, FD_NET_MTU, FD_NET_MTU ) ) ) {
++                                       queues[vf_idx], (uint)tile_cnt, vf_pci, FD_NET_MTU, FD_NET_MTU ) ) ) {
+       FD_LOG_ERR(( "VF %s setup failed (%i-%s)", vf_pci, errno, fd_io_strerror( errno ) ));
+     }
+   }
+ 
+   /* Fill RX descriptors before enabling reception */
+-  fd_iavf_tile_init_pkt_bufs( topo, tile, ctx );
+-  if( fds ) fds->member_cnt = ctx->vf_cnt;
+-  for( ulong vf_idx=0UL; vf_idx<ctx->vf_cnt; vf_idx++ ) {
+-    fd_iavf_tile_vf_t * vf = &ctx->vfs[vf_idx];
+-    char const * pf_if = tile->iavf.members[vf_idx];
+-    if( FD_UNLIKELY( fd_iavf_virtchnl_enable_queue( &vf->vfio, &vf->adminq, &vf->vf_info, &queues[vf_idx] ) ) ) {
++  for( ulong tile_idx=0UL; tile_idx<tile_cnt; tile_idx++ ) {
++    fd_iavf_tile_init_pkt_bufs( topo, tiles[tile_idx], ctxs[tile_idx] );
++  }
++
++  /* Enable queues and distribute VF state to all tiles */
++  if( NULL!=fds ) fds->member_cnt = owner->vf_cnt;
++  for( ulong vf_idx=0UL; vf_idx<owner->vf_cnt; vf_idx++ ) {
++    fd_iavf_tile_vf_t * vf = &owner->vfs[vf_idx];
++    char const * pf_if = first_tile->iavf.members[vf_idx];
++    if( FD_UNLIKELY( -1==fd_iavf_virtchnl_enable_queues( &vf->vfio, &vf->adminq, &vf->vf_info, queues[vf_idx], (uint)tile_cnt ) ) ) {
+       FD_LOG_ERR(( "VF queue enable for PF %s failed (%i-%s)", pf_if, errno, fd_io_strerror( errno ) ));
+     }
++    fd_iavf_tile_publish_vf_link( owner, vf_idx );
++
++    /* Save VFIO descriptors for child launch */
+     if( NULL!=fds ) {
+       fds->container_fd[ vf_idx ] = vf->vfio.container_fd;
+       fds->group_fd    [ vf_idx ] = vf->vfio.group_fd;
+       fds->device_fd   [ vf_idx ] = vf->vfio.device_fd;
+     }
++
++    /* Each tile remaps BAR0 at launch */
+     if( FD_UNLIKELY( -1==fd_iavf_vfio_unmap_bar( &vf->vfio ) ) ) {
+       FD_LOG_ERR(( "VF BAR unmap for PF %s failed (%i-%s)", pf_if, errno, fd_io_strerror( errno ) ));
+     }
+-    vf->tx_queue.tail = NULL;
+-    vf->rx_queue.tail = NULL;
++
++    /* Copy VF resources while retaining each tile's queues */
++    for( ulong tile_idx=0UL; tile_idx<tile_cnt; tile_idx++ ) {
++      fd_iavf_tile_vf_t * tile_vf = &ctxs[tile_idx]->vfs[vf_idx];
++      tile_vf->vfio          = vf->vfio;
++      tile_vf->vf_info       = vf->vf_info;
++      tile_vf->tx_queue.tail = NULL;
++      tile_vf->rx_queue.tail = NULL;
++    }
+   }
+-  ctx->prepared = 1U;
++  for( ulong tile_idx=0UL; tile_idx<tile_cnt; tile_idx++ ) ctxs[tile_idx]->prepared = 1U;
+ }
+ #endif
+ 
+@@ -908,11 +992,18 @@ privileged_init( fd_topo_t const *      topo,
+   fd_iavf_hw_join_queues( ctx, tile );
+   fd_iavf_tile_join_pkt_bufs( topo, tile, ctx, NULL, NULL, NULL );
+ 
++  /* Use tile 0's VF link decisions */
++  ulong const owner_tile_id = fd_topo_find_tile( topo, "iavf", 0UL );
++  FD_TEST( owner_tile_id!=ULONG_MAX );
++  fd_iavf_tile_t const * owner = fd_topo_obj_laddr( topo, topo->tiles[ owner_tile_id ].tile_obj_id );
++  ctx->vf_link_usable_shared = owner->vf_link_usable;
++
++  /* Queue IDs match IAVF tile indices */
+   for( ulong vf_idx=0UL; vf_idx<ctx->vf_cnt; vf_idx++ ) {
+     fd_iavf_tile_vf_t * vf = &ctx->vfs[vf_idx];
+     char const * pf_if = tile->iavf.members[vf_idx];
+ 
+-    if( FD_UNLIKELY( fd_iavf_hw_map_regs( vf, 0UL ) ) ) {
++    if( FD_UNLIKELY( -1==fd_iavf_hw_map_regs( vf, tile->kind_id ) ) ) {
+       FD_LOG_ERR(( "VF register mapping for PF %s failed (%i-%s)", pf_if, errno, fd_io_strerror( errno ) ));
+     }
+   }
+@@ -926,7 +1017,8 @@ privileged_init( fd_topo_t const *      topo,
+   ctx->router.if_virt         = interface_idx;
+   ctx->router.default_address = fd_iavf_tile_if_ip4_addr( tile->iavf.if_name );
+ 
+-  ctx->lo_tx_sock = fd_iavf_tile_lo_tx_socket();
++  /* Only tile 0 sends loopback traffic */
++  ctx->lo_tx_sock = 0UL==tile->kind_id ? fd_iavf_tile_lo_tx_socket() : -1;
+ }
+ 
+ FD_FN_UNUSED static void
+diff --git a/src/disco/net/iavf/test_iavf_tile.c b/src/disco/net/iavf/test_iavf_tile.c
+index 959984b583a..60143c26453 100644
+--- a/src/disco/net/iavf/test_iavf_tile.c
++++ b/src/disco/net/iavf/test_iavf_tile.c
+@@ -176,8 +176,8 @@ test_queue_mapping_failure( void ) {
+   };
+   /* A mapping failure must leave descriptor memory and queue state untouched. */
+   fd_memset( memory, 0xa5, sizeof(memory) );
+-  FD_TEST( fd_iavf_virtchnl_configure_queue( &vfio, &adminq, &resources, &tile,
+-                                            4096UL, 2048U, 2048U )==-1 && errno==EBADF );
++  FD_TEST( -1==fd_iavf_virtchnl_configure_queues( &vfio, &adminq, &resources, &tile,
++                                                 1U, 4096UL, 2048U, 2048U ) && errno==EBADF );
+   for( ulong i=0UL; i<sizeof(memory); i++ ) FD_TEST( memory[i]==0xa5 );
+   FD_TEST( NULL==tx_queue.ring && NULL==rx_queue.ring );
+ }
+@@ -284,6 +284,25 @@ test_bond_route( void ) {
+   FD_TEST( test_tile.net.tx_route.if_idx==4U );
+   FD_TEST( 0==memcmp( test_tile.net.tx_route.mac_addrs, neighbor.mac_addr, 6UL ) );
+   FD_TEST( 0==memcmp( test_tile.net.tx_route.mac_addrs+6UL, test_netdevs[0].mac_addr, 6UL ) );
++  for( ulong tile_cnt=1UL; tile_cnt<=FD_IAVF_TILE_MAX; tile_cnt++ ) {
++    test_tile.net.tile_cnt = tile_cnt;
++    for( ushort port=9000U; port<9256U; port++ ) {
++      ulong multi_sig = fd_disco_netmux_sig( dst, port, dst, DST_PROTO_OUTGOING, 0UL );
++      ulong target    = fd_disco_netmux_sig_hash( multi_sig )%tile_cnt;
++      ulong accepted  = 0UL;
++      for( ulong tile_idx=0UL; tile_idx<tile_cnt; tile_idx++ ) {
++        test_tile.net.kind_id = tile_idx;
++        if( !before_frag( &test_tile, 0UL, 0UL, multi_sig ) ) {
++          FD_TEST( tile_idx==target );
++          accepted++;
++        }
++      }
++      FD_TEST( accepted==1UL );
++    }
++  }
++  test_tile.net.kind_id  = 0UL;
++  test_tile.net.tile_cnt = 1UL;
++  FD_TEST( !before_frag( &test_tile, 0UL, 0UL, sig ) );
+   ulong chosen = test_tile.tx_vf_idx;
+   FD_TEST( !before_frag( &test_tile, 0UL, 0UL, sig ) && test_tile.tx_vf_idx==chosen );
+   test_tile.vfs[chosen].vf_info.link_usable = 0;
+@@ -296,6 +315,38 @@ test_bond_route( void ) {
+   FD_TEST( before_frag( &test_tile, 0UL, 0UL, sig ) );
+   FD_TEST( test_tile.net.metrics.tx_drop_cnt[ FD_METRICS_ENUM_PKT_TX_DROP_REASON_V_UNSUPPORTED_INTERFACE_IDX ]==1UL );
+   FD_TEST( test_tile.metrics.tx_no_link_cnt==1UL );
++
++  /* One failed job must count once even when tile 0 probes for loopback. */
++  fd_fib4_clear( test_tile.router.fib_main );
++  test_tile.net.tile_cnt = 2UL;
++  for( ushort port=9000U; 0==(fd_disco_netmux_sig_hash( sig )%2UL); port++ ) {
++    FD_TEST( port<10000U );
++    sig = fd_disco_netmux_sig( dst, port, dst, DST_PROTO_OUTGOING, 0UL );
++  }
++  for( ulong tile_idx=0UL; tile_idx<2UL; tile_idx++ ) {
++    test_tile.net.kind_id = tile_idx;
++    FD_TEST( before_frag( &test_tile, 0UL, 0UL, sig ) );
++  }
++  FD_TEST( test_tile.net.metrics.tx_drop_cnt[ FD_METRICS_ENUM_PKT_TX_DROP_REASON_V_NO_ROUTE_IDX ]==1UL );
++
++  /* An unroutable GRE outer endpoint is counted once, as NoRoute */
++  test_tile.net.kind_id  = 0UL;
++  test_tile.net.tile_cnt = 1UL;
++  test_netdevs[1].dev_type   = ARPHRD_IPGRE;
++  test_netdevs[1].gre_dst_ip = FD_IP4_ADDR( 192,0,2,1 );
++  FD_TEST( fd_fib4_insert( test_tile.router.fib_main, dst, 32, 0U, &hop ) );
++  FD_TEST( before_frag( &test_tile, 0UL, 0UL, sig ) );
++  FD_TEST( test_tile.net.metrics.tx_drop_cnt[ FD_METRICS_ENUM_PKT_TX_DROP_REASON_V_NO_ROUTE_IDX ]==2UL );
++  FD_TEST( test_tile.net.metrics.tx_drop_cnt[ FD_METRICS_ENUM_PKT_TX_DROP_REASON_V_GRE_NO_ROUTE_IDX ]==0UL );
++
++  test_tile.net.tile_cnt = 2UL;
++  test_netdevs[1] = (fd_netdev_t) { .if_idx=1U, .dev_type=ARPHRD_LOOPBACK };
++  hop.rtype = FD_FIB4_RTYPE_LOCAL;
++  FD_TEST( fd_fib4_insert( test_tile.router.fib_local, dst, 32, 0U, &hop ) );
++  for( ulong tile_idx=0UL; tile_idx<2UL; tile_idx++ ) {
++    test_tile.net.kind_id = tile_idx;
++    FD_TEST( before_frag( &test_tile, 0UL, 0UL, sig )==(int)(tile_idx!=0UL) );
++  }
+ }
+ 
+ static void
+@@ -606,6 +657,47 @@ test_vf_batches( void ) {
+   }
+ }
+ 
++static void
++test_shared_links( void ) {
++  static fd_iavf_tile_t reader;
++  test_vfs_init();
++  reader                       = test_tile;
++  reader.net.kind_id           = 1UL;
++  reader.vf_link_usable_shared = test_tile.vf_link_usable;
++  for( ulong i=0UL; i<test_tile.vf_cnt; i++ ) {
++    fd_iavf_tile_publish_vf_link( &test_tile, i );
++  }
++  fd_iavf_tile_vf_housekeeping( &reader );
++  FD_TEST( 0==fd_iavf_tile_select_tx_vf( &reader, 0UL ) );
++  test_tile.vfs[0].vf_info.link_usable = 0;
++  fd_iavf_tile_publish_vf_link( &test_tile, 0UL );
++  FD_TEST( 0==fd_iavf_tile_select_tx_vf( &reader, 0UL ) );
++  fd_iavf_tile_vf_housekeeping( &reader );
++  FD_TEST( fd_iavf_tile_select_tx_vf( &reader, 0UL )==1UL );
++  FD_TEST( !reader.vfs[0].vf_info.link_usable );
++  test_tile.vfs[1].vf_info.link_usable = 0;
++  fd_iavf_tile_publish_vf_link( &test_tile, 1UL );
++  fd_iavf_tile_vf_housekeeping( &reader );
++  FD_TEST( fd_iavf_tile_select_tx_vf( &reader, 0UL )==ULONG_MAX );
++  test_tile.vfs[0].vf_info.link_usable = 1;
++  fd_iavf_tile_publish_vf_link( &test_tile, 0UL );
++  fd_iavf_tile_vf_housekeeping( &reader );
++  FD_TEST( 0==fd_iavf_tile_select_tx_vf( &reader, 0UL ) );
++  FD_TEST( NULL==reader.vfs[0].adminq.dma_memory && NULL==reader.vfs[0].vfio.bar0 );
++
++  test_tile.vf_housekeeping_deadline_ticks = LONG_MAX;
++  fd_iavf_tile_vf_housekeeping( &test_tile );
++  FD_TEST( test_tile.vf_housekeeping_deadline_ticks==LONG_MAX );
++
++  test_tile.vf_cnt = 1UL;
++  test_adminq_init( &test_tile.vfs[0].vfio, &test_tile.vfs[0].adminq );
++  test_tile.vf_housekeeping_interval_ticks = (long)(FD_IAVF_VF_HOUSEKEEPING_INTERVAL_NS*fd_tempo_tick_per_ns( NULL ));
++  test_tile.vf_housekeeping_deadline_ticks = 0L;
++  long const now = fd_tickcount();
++  fd_iavf_tile_vf_housekeeping( &test_tile );
++  FD_TEST( test_tile.vf_housekeeping_deadline_ticks>=now+test_tile.vf_housekeeping_interval_ticks );
++}
++
+ static void
+ test_packet_memory( void ) {
+   ulong cpu_idx = fd_tile_cpu_id( fd_tile_idx() );
+@@ -617,7 +709,7 @@ test_packet_memory( void ) {
+   topo.workspaces[0].wksp = wksp;
+ 
+   ulong packet_end = 0UL;
+-  for( ulong i=0UL; i<1UL; i++ ) {
++  for( ulong i=0UL; i<FD_IAVF_TILE_MAX; i++ ) {
+     ulong const data_sz = (65UL+2UL*i)*FD_NET_MTU+17UL;
+     ulong const footprint = fd_dcache_footprint( data_sz, 0UL );
+     void * packet_dcache_memory = fd_wksp_alloc_laddr( wksp, fd_dcache_align(), footprint, 1UL );
+@@ -680,7 +772,7 @@ test_queue_join( void ) {
+   tile.iavf.rx_queue_size  = 128U;
+   tile.iavf.route_max      = 16UL;
+   tile.iavf.route_peer_max = 16UL;
+-  for( ulong kind_id=0UL; kind_id<1UL; kind_id++ ) {
++  for( ulong kind_id=0UL; kind_id<2UL; kind_id++ ) {
+     tile.kind_id = kind_id;
+     ulong footprint = scratch_footprint( &tile );
+     void * memory;
+@@ -721,7 +813,7 @@ test_hardware( char const * pci_addr,
+   fd_iavf_vfio_t     vfio;
+   fd_iavf_adminq_t   adminq = {0};
+   fd_iavf_vf_info_t  info;
+-  FD_TEST( queue_cnt && queue_cnt<=1UL );
++  FD_TEST( 0!=queue_cnt && queue_cnt<=FD_IAVF_TILE_MAX );
+   ulong cpu_idx = fd_tile_cpu_id( fd_tile_idx() );
+   if( cpu_idx>=fd_shmem_cpu_cnt() ) cpu_idx = 0UL;
+   fd_wksp_t * wksp = fd_wksp_new_anonymous( FD_SHMEM_NORMAL_PAGE_SZ, 512UL, cpu_idx, "iavf-hardware", 0UL );
+@@ -729,9 +821,9 @@ test_hardware( char const * pci_addr,
+   static fd_topo_t topo;
+   fd_memset( &topo, 0, sizeof(topo) );
+   topo.workspaces[0].wksp = wksp;
+-  static fd_iavf_tile_t tiles[ 1UL ];
+-  fd_iavf_vfio_tile_t queues[ 1UL ];
+-  uint chunks[ 1UL ][ 64 ];
++  static fd_iavf_tile_t tiles[ FD_IAVF_TILE_MAX ];
++  fd_iavf_vfio_tile_t queues[ FD_IAVF_TILE_MAX ];
++  uint chunks[ FD_IAVF_TILE_MAX ][ 64 ];
+   ulong const queue_sz = fd_iavf_queue_footprint( 64U, 64U );
+   for( uint i=0U; i<queue_cnt; i++ ) {
+     fd_memset( &tiles[i], 0, sizeof(tiles[i]) );
+@@ -756,7 +848,7 @@ test_hardware( char const * pci_addr,
+                                 &queues[i].packet_memory, &queues[i].packet_memory_sz, &queues[i].packet_iova );
+   }
+   FD_TEST( 0==posix_memalign( &adminq.dma_memory, FD_IAVF_PAGE_SZ, fd_iavf_adminq_footprint() ) );
+-  FD_TEST( !fd_iavf_init( &vfio, &adminq, &info, queues, pci_addr, 2048U, 2048U ) );
++  FD_TEST( 0==fd_iavf_init( &vfio, &adminq, &info, queues, queue_cnt, pci_addr, 2048U, 2048U ) );
+   FD_LOG_NOTICE(( "VF %s, VSI %hu, queue pairs %hu, vectors %hu, RSS key %u, RSS table %u",
+                   pci_addr, info.vsi_id, info.queue_pair_cnt, info.vector_cnt,
+                   info.rss_key_sz, info.rss_lut_sz ));
+@@ -770,7 +862,7 @@ test_hardware( char const * pci_addr,
+     FD_LOG_NOTICE(( "queue %u packet IOVA %#lx, size %lu, first descriptor %#lx",
+                     i, queues[i].packet_iova, queues[i].packet_memory_sz, ((fd_iavf_hw_rx_desc_t *)vf->rx_queue.ring)[0].qword[0] ));
+   }
+-  FD_TEST( !fd_iavf_virtchnl_enable_queue( &vfio, &adminq, &info, queues ) );
++  FD_TEST( 0==fd_iavf_virtchnl_enable_queues( &vfio, &adminq, &info, queues, queue_cnt ) );
+   FD_LOG_NOTICE(( "%u queues enabled with RSS delivery and the PF-assigned MAC", queue_cnt ));
+ 
+   FD_TEST( 0==fd_iavf_vfio_unmap_bar( &vfio ) );
+@@ -801,6 +893,7 @@ main( int argc, char ** argv ) {
+   test_inactive_rx();
+   test_rx_non_fd_packets();
+   test_vf_batches();
++  test_shared_links();
+   test_packet_memory();
+   test_queue_join();
+ 
+@@ -812,7 +905,7 @@ main( int argc, char ** argv ) {
+     if( argc==3 ) {
+       char * end;
+       ulong count = strtoul( argv[2], &end, 10 );
+-      FD_TEST( !*end && count && count<=1UL );
++      FD_TEST( 0==*end && 0!=count && count<=FD_IAVF_TILE_MAX );
+       queue_cnt = (uint)count;
+     }
+     FD_TEST( argc<=3 );

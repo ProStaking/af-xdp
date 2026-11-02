@@ -1,0 +1,402 @@
+From f70dad67e1bdfc0c390c917db50a4fe3dffe2945 Mon Sep 17 00:00:00 2001
+From: Tristan Carter <trcarterintern@jumptrading.com>
+Date: Mon, 12 Oct 2026 15:20:50 +0000
+Subject: [PATCH] net: load vfio-pci in the iavf configure stage
+
+---
+ src/app/platform/fd_sys_util.c                | 43 +++++++++++++++++
+ src/app/platform/fd_sys_util.h                |  7 +++
+ src/app/shared/commands/configure/configure.c |  2 +-
+ src/app/shared/commands/configure/iavf.c      | 41 ++++++++++++++--
+ src/app/shared/commands/configure/mlx5.c      |  3 +-
+ src/app/shared/fd_auto_net.c                  |  3 +-
+ src/disco/net/iavf/fd_iavf.c                  | 47 +++++++++++++++++++
+ src/disco/net/iavf/fd_iavf.h                  | 13 +++++
+ src/disco/net/mlx5/fd_mlx5.c                  | 42 -----------------
+ src/disco/net/mlx5/fd_mlx5.h                  |  6 ---
+ 10 files changed, 152 insertions(+), 55 deletions(-)
+
+diff --git a/src/app/platform/fd_sys_util.c b/src/app/platform/fd_sys_util.c
+index cccd2d7cbfd..ca313c76e52 100644
+--- a/src/app/platform/fd_sys_util.c
++++ b/src/app/platform/fd_sys_util.c
+@@ -3,6 +3,7 @@
+ 
+ #include <pwd.h>
+ #include <errno.h>
++#include <fcntl.h>
+ #include <stdlib.h> /* getenv */
+ #include <time.h>
+ #include <unistd.h>
+@@ -28,6 +29,48 @@ fd_sys_util_nanosleep( uint secs,
+   return 0;
+ }
+ 
++int
++fd_sys_util_modprobe( char const * module,
++                      int          is_dry_run ) {
++  pid_t pid = fork();
++  if( FD_UNLIKELY( -1==pid ) ) {
++    FD_LOG_WARNING(( "fork() for modprobe failed (%i-%s)", errno, fd_io_strerror( errno ) ));
++    return -1;
++  }
++  if( 0==pid ) {
++    int null_fd = open( "/dev/null", O_RDWR );
++    if( FD_UNLIKELY( -1==null_fd ) ) {
++      FD_LOG_WARNING(( "open(/dev/null) for modprobe failed (%i-%s)", errno, fd_io_strerror( errno ) ));
++      _exit( 1 );
++    }
++    if( FD_UNLIKELY( -1==dup2( null_fd, STDIN_FILENO ) ||
++                     ( is_dry_run && -1==dup2( null_fd, STDOUT_FILENO ) ) ) ) {
++      FD_LOG_WARNING(( "dup2() for modprobe failed (%i-%s)", errno, fd_io_strerror( errno ) ));
++      _exit( 1 );
++    }
++    if( null_fd!=STDIN_FILENO &&
++        !( is_dry_run && null_fd==STDOUT_FILENO ) ) close( null_fd );
++
++    char * argv[] = { "modprobe", "--quiet", (char *)module, NULL, NULL };
++    if( is_dry_run ) {
++      argv[2] = "--dry-run";
++      argv[3] = (char *)module;
++    }
++    char * const envp[] = { NULL };
++    execve( "/sbin/modprobe", argv, envp );
++    FD_LOG_WARNING(( "execve(/sbin/modprobe) failed (%i-%s)", errno, fd_io_strerror( errno ) ));
++    _exit( 1 );
++  }
++
++  int status;
++  while( FD_UNLIKELY( -1==waitpid( pid, &status, 0 ) ) ) {
++    if( errno==EINTR ) continue;
++    FD_LOG_WARNING(( "waitpid() for modprobe failed (%i-%s)", errno, fd_io_strerror( errno ) ));
++    return -1;
++  }
++  return WIFEXITED( status ) && 0==WEXITSTATUS( status ) ? 0 : -1;
++}
++
+ char const *
+ fd_sys_util_login_user( void ) {
+   char * name = getenv( "SUDO_USER" );
+diff --git a/src/app/platform/fd_sys_util.h b/src/app/platform/fd_sys_util.h
+index 010bb121f5c..64bf822ed9e 100644
+--- a/src/app/platform/fd_sys_util.h
++++ b/src/app/platform/fd_sys_util.h
+@@ -24,6 +24,13 @@ int
+ fd_sys_util_nanosleep( uint secs,
+                        uint nanos );
+ 
++/* fd_sys_util_modprobe invokes modprobe for module.  is_dry_run=1 checks
++   availability without loading it, is_dry_run=0 loads it.
++   Returns 0 if modprobe succeeds, otherwise -1. */
++int
++fd_sys_util_modprobe( char const * module,
++                      int          is_dry_run );
++
+ /* fd_sys_util_username() returns the best guess at the currently logged
+    in user.  This is not necessarily the same as the user running the
+    process.  The function returns NULL on failure, or the (probable)
+diff --git a/src/app/shared/commands/configure/configure.c b/src/app/shared/commands/configure/configure.c
+index 4677da37188..4d2bb720416 100644
+--- a/src/app/shared/commands/configure/configure.c
++++ b/src/app/shared/commands/configure/configure.c
+@@ -252,7 +252,7 @@ check_file( const char * path,
+ 
+ static char const *
+ configure_stage_help( char const * name ) {
+-  if( !strcmp( name, "iavf"             ) ) return "create VF 0 and PF UDP hardware drop rules";
++  if( !strcmp( name, "iavf"             ) ) return "configure VFs, PF drop rules, and load the vfio-pci kernel module";
+   if( !strcmp( name, "mlx5"             ) ) return "configure mlx5 network devices and load the ib_uverbs kernel module";
+   if( !strcmp( name, "hugetlbfs"        ) ) return "mount the huge page filesystems";
+   if( !strcmp( name, "sysctl"           ) ) return "apply required kernel sysctl tunables";
+diff --git a/src/app/shared/commands/configure/iavf.c b/src/app/shared/commands/configure/iavf.c
+index 991fd69079a..d1bcc3f1d4e 100644
+--- a/src/app/shared/commands/configure/iavf.c
++++ b/src/app/shared/commands/configure/iavf.c
+@@ -3,6 +3,7 @@
+ #include "configure.h"
+ #include "fd_ethtool_ioctl.h"
+ #include "../../../platform/fd_file_util.h"
++#include "../../../platform/fd_sys_util.h"
+ #include "../../../../disco/net/iavf/fd_iavf.h"
+ #include "../../../../waltz/ip/fd_netlink1.h"
+ #include "../../../../util/net/fd_eth.h"
+@@ -10,6 +11,7 @@
+ #include <dirent.h>
+ #include <errno.h>
+ #include <fcntl.h>
++#include <linux/capability.h>
+ #include <linux/ethtool.h>
+ #include <linux/rtnetlink.h>
+ #include <linux/sockios.h>
+@@ -45,8 +47,17 @@ enabled( fd_config_t const * config ) {
+ }
+ 
+ static void
+-perm( fd_cap_chk_t *      chk,
+-      fd_config_t const * config FD_PARAM_UNUSED ) {
++init_perm( fd_cap_chk_t *      chk,
++           fd_config_t const * config FD_PARAM_UNUSED ) {
++  fd_cap_chk_root( chk, NAME, "configure Intel SR-IOV VFs and PF filters" );
++  if( !fd_iavf_vfio_avail() ) {
++    fd_cap_chk_cap( chk, NAME, CAP_SYS_MODULE, "run modprobe to load the vfio-pci kernel module" );
++  }
++}
++
++static void
++fini_perm( fd_cap_chk_t *      chk,
++           fd_config_t const * config FD_PARAM_UNUSED ) {
+   fd_cap_chk_root( chk, NAME, "configure Intel SR-IOV VFs and PF filters" );
+ }
+ 
+@@ -829,6 +840,19 @@ iavf_pf_configure( char const *        pf_if,
+ 
+ static void
+ init( fd_config_t const * config ) {
++  if( !fd_iavf_vfio_avail() ) {
++    FD_LOG_NOTICE(( "%sRUN: `modprobe vfio-pci`%s", fd_log_style_dim(), fd_log_style_normal() ));
++    if( FD_UNLIKELY( -1==fd_sys_util_modprobe( "vfio-pci", 0 ) ) ) {
++      FD_LOG_ERR(( "failed to load vfio-pci kernel module. Run `sudo modprobe vfio-pci` and retry" ));
++    }
++    if( FD_UNLIKELY( !fd_iavf_vfio_avail() ) ) {
++      FD_LOG_ERR(( "vfio-pci driver still unavailable after trying to load its kernel module" ));
++    }
++  }
++  char const * diagnostic;
++  if( FD_UNLIKELY( -1==fd_iavf_vfio_api_check( &diagnostic ) ) ) {
++    FD_LOG_ERR(( "%s (%i-%s)", diagnostic, errno, fd_io_strerror( errno ) ));
++  }
+   char const * members[] = { config->net.interface };
+   ulong const member_cnt = 1UL;
+   /* Resolve the PF's iommu_group and check VF BAR allocations when
+@@ -931,6 +955,15 @@ check( fd_config_t const * config,
+     missing_cnt += (ulong)(result.result==CONFIGURE_NOT_CONFIGURED);
+     if( first.result==CONFIGURE_OK && result.result!=CONFIGURE_OK ) first = result;
+   }
++  if( check_type!=FD_CONFIGURE_CHECK_TYPE_FINI_PERM &&
++      check_type!=FD_CONFIGURE_CHECK_TYPE_PRE_FINI  &&
++      check_type!=FD_CONFIGURE_CHECK_TYPE_POST_FINI ) {
++    if( !fd_iavf_vfio_avail() ) NOT_CONFIGURED( "vfio-pci driver unavailable" );
++    char const * diagnostic;
++    if( -1==fd_iavf_vfio_api_check( &diagnostic ) ) {
++      NOT_CONFIGURED( "%s (%i-%s)", diagnostic, errno, fd_io_strerror( errno ) );
++    }
++  }
+   if( first.result==CONFIGURE_OK ) CONFIGURE_OK();
+   /* configure_stage runs fini before init for PARTIALLY_CONFIGURED results.
+      Return NOT_CONFIGURED so init can fix VFIO binding, VF settings and
+@@ -945,8 +978,8 @@ check( fd_config_t const * config,
+ configure_stage_t fd_cfg_stage_iavf = {
+   .name      = NAME,
+   .enabled   = enabled,
+-  .init_perm = perm,
+-  .fini_perm = perm,
++  .init_perm = init_perm,
++  .fini_perm = fini_perm,
+   .init      = init,
+   .fini      = fini,
+   .check     = check,
+diff --git a/src/app/shared/commands/configure/mlx5.c b/src/app/shared/commands/configure/mlx5.c
+index 444448d1c25..aa602321fb8 100644
+--- a/src/app/shared/commands/configure/mlx5.c
++++ b/src/app/shared/commands/configure/mlx5.c
+@@ -1,5 +1,6 @@
+ #include "configure.h"
+ #include "fd_ethtool_ioctl.h"
++#include "../../../platform/fd_sys_util.h"
+ #include "../../../../disco/net/mlx5/fd_mlx5.h"
+ 
+ #include <linux/capability.h>
+@@ -28,7 +29,7 @@ static void
+ init( config_t const * config FD_PARAM_UNUSED ) {
+   if( !fd_mlx5_uverbs_avail() ) {
+     FD_LOG_NOTICE(( "%sRUN: `modprobe ib_uverbs`%s", fd_log_style_dim(), fd_log_style_normal() ));
+-    if( FD_UNLIKELY( fd_mlx5_uverbs_modprobe( 0 ) ) ) {
++    if( FD_UNLIKELY( -1==fd_sys_util_modprobe( "ib_uverbs", 0 ) ) ) {
+       FD_LOG_ERR(( "failed to load ib_uverbs kernel module. "
+                    "Run `sudo modprobe ib_uverbs` and retry" ));
+     }
+diff --git a/src/app/shared/fd_auto_net.c b/src/app/shared/fd_auto_net.c
+index 0ee25bd1ea6..581a67b9ec8 100644
+--- a/src/app/shared/fd_auto_net.c
++++ b/src/app/shared/fd_auto_net.c
+@@ -1,4 +1,5 @@
+ #include "fd_auto_net.h"
++#include "../platform/fd_sys_util.h"
+ #include "../../disco/net/fd_linux_bond.h"
+ #include "../../disco/net/fd_net_tile.h"
+ #include "../../disco/net/mlx5/fd_mlx5.h"
+@@ -446,7 +447,7 @@ fd_auto_scrape_info( fd_config_t const * config ) {
+   if( !strcmp( config->net.provider, "auto" ) &&
+       info.has_mlx5_rdma_port                 &&
+       !info.has_uverbs ) {
+-    info.has_uverbs_module = !fd_mlx5_uverbs_modprobe( 1 );
++    info.has_uverbs_module = 0==fd_sys_util_modprobe( "ib_uverbs", 1 );
+   }
+ 
+   return info;
+diff --git a/src/disco/net/iavf/fd_iavf.c b/src/disco/net/iavf/fd_iavf.c
+index fe70f8cf43e..a681d4b20fa 100644
+--- a/src/disco/net/iavf/fd_iavf.c
++++ b/src/disco/net/iavf/fd_iavf.c
+@@ -18,6 +18,7 @@
+ #include <string.h>
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
++#include <sys/stat.h>
+ #include <time.h>
+ #include <unistd.h>
+ 
+@@ -397,6 +398,52 @@ fd_iavf_read_link_name( char *       name,
+   return 0;
+ }
+ 
++int
++fd_iavf_vfio_avail( void ) {
++  struct stat st;
++  return 0==stat( "/sys/bus/pci/drivers/vfio-pci", &st ) && S_ISDIR( st.st_mode );
++}
++
++int
++fd_iavf_vfio_api_check( char const ** diagnostic ) {
++  if( NULL!=diagnostic ) *diagnostic = NULL;
++
++  char const * message = "Opening /dev/vfio/vfio failed";
++  int fd = open( "/dev/vfio/vfio", O_RDWR|O_CLOEXEC );
++  if( FD_UNLIKELY( -1==fd ) ) goto fail;
++
++  message = "Reading the VFIO API version from /dev/vfio/vfio failed";
++  int api_version = ioctl( fd, VFIO_GET_API_VERSION );
++  if( FD_UNLIKELY( -1==api_version ) ) goto fail;
++  if( FD_UNLIKELY( api_version!=VFIO_API_VERSION ) ) {
++    message = "The kernel's VFIO API version is incompatible with the iavf networking provider";
++    errno   = EPROTONOSUPPORT;
++    goto fail;
++  }
++  message = "Checking VFIO TYPE1v2 IOMMU support through /dev/vfio/vfio failed";
++  int type1v2_supported = ioctl( fd, VFIO_CHECK_EXTENSION, VFIO_TYPE1v2_IOMMU );
++  if( FD_UNLIKELY( -1==type1v2_supported ) ) goto fail;
++  if( FD_UNLIKELY( !type1v2_supported ) ) {
++    message = "VFIO TYPE1v2 IOMMU support is unavailable";
++    errno   = EPROTONOSUPPORT;
++    goto fail;
++  }
++  if( FD_UNLIKELY( -1==close( fd ) ) ) {
++    if( NULL!=diagnostic ) *diagnostic = "Closing /dev/vfio/vfio failed";
++    return -1;
++  }
++  return 0;
++
++fail:
++  {
++    int err = errno;
++    if( -1!=fd ) close( fd );
++    if( NULL!=diagnostic ) *diagnostic = message;
++    errno = err;
++    return -1;
++  }
++}
++
+ #if FD_HAS_X86
+ static int
+ fd_iavf_cpu_vendor( char vendor[ 13 ] ) {
+diff --git a/src/disco/net/iavf/fd_iavf.h b/src/disco/net/iavf/fd_iavf.h
+index 3aa5ab33833..bce43df7459 100644
+--- a/src/disco/net/iavf/fd_iavf.h
++++ b/src/disco/net/iavf/fd_iavf.h
+@@ -24,6 +24,19 @@ typedef struct fd_iavf_pci_info fd_iavf_pci_info_t;
+ 
+ FD_PROTOTYPES_BEGIN
+ 
++/* fd_iavf_vfio_avail returns 1 if the vfio-pci driver is registered with
++   the kernel, or 0 otherwise. Does not load the module. */
++int
++fd_iavf_vfio_avail( void );
++
++/* fd_iavf_vfio_api_check checks the VFIO API version and TYPE1v2 IOMMU
++   support through /dev/vfio/vfio
++   Returns 0 on success or -1 with errno set
++   If diagnostic is non-NULL, sets it to NULL on success or a static
++   error message on failure */
++int
++fd_iavf_vfio_api_check( char const ** diagnostic );
++
+ /* fd_iavf_sriov_bios_guide returns a static BIOS setup explanation for the
+    detected manufacturer and CPU, with a vendor URL when available.
+    Otherwise returns generic advice, or NULL if vendor_only is nonzero */
+diff --git a/src/disco/net/mlx5/fd_mlx5.c b/src/disco/net/mlx5/fd_mlx5.c
+index f586f4ce653..d3a8c8c9871 100644
+--- a/src/disco/net/mlx5/fd_mlx5.c
++++ b/src/disco/net/mlx5/fd_mlx5.c
+@@ -20,7 +20,6 @@
+ #include <sys/mman.h>
+ #include <sys/stat.h>
+ #include <sys/syscall.h>
+-#include <sys/wait.h>
+ #include <unistd.h>
+ 
+ #include <rdma/ib_user_ioctl_cmds.h>
+@@ -292,47 +291,6 @@ fd_mlx5_uverbs_avail( void ) {
+   return !stat( "/sys/class/infiniband_verbs", &class_stat ) && S_ISDIR( class_stat.st_mode );
+ }
+ 
+-int
+-fd_mlx5_uverbs_modprobe( int is_dry_run ) {
+-  pid_t pid = fork();
+-  if( FD_UNLIKELY( pid<0 ) ) {
+-    FD_LOG_WARNING(( "fork() for modprobe failed (%i-%s)", errno, fd_io_strerror( errno ) ));
+-    return -1;
+-  }
+-  if( !pid ) {
+-    int null_fd = open( "/dev/null", O_RDWR );
+-    if( FD_UNLIKELY( null_fd<0 ) ) {
+-      FD_LOG_WARNING(( "open(/dev/null) for modprobe failed (%i-%s)", errno, fd_io_strerror( errno ) ));
+-      _exit( 1 );
+-    }
+-    if( FD_UNLIKELY( dup2( null_fd, STDIN_FILENO )<0 ||
+-                     ( is_dry_run && dup2( null_fd, STDOUT_FILENO )<0 ) ) ) {
+-      FD_LOG_WARNING(( "dup2() for modprobe failed (%i-%s)", errno, fd_io_strerror( errno ) ));
+-      _exit( 1 );
+-    }
+-    if( null_fd!=STDIN_FILENO &&
+-        !( is_dry_run && null_fd==STDOUT_FILENO ) ) close( null_fd );
+-
+-    char * argv[] = { "modprobe", "--quiet", "ib_uverbs", NULL, NULL };
+-    if( is_dry_run ) {
+-      argv[2] = "--dry-run";
+-      argv[3] = "ib_uverbs";
+-    }
+-    char * const envp[] = { NULL };
+-    execve( "/sbin/modprobe", argv, envp );
+-    FD_LOG_WARNING(( "execve(/sbin/modprobe) failed (%i-%s)", errno, fd_io_strerror( errno ) ));
+-    _exit( 1 );
+-  }
+-
+-  int status;
+-  while( FD_UNLIKELY( waitpid( pid, &status, 0 )<0 ) ) {
+-    if( errno==EINTR ) continue;
+-    FD_LOG_WARNING(( "waitpid() for modprobe failed (%i-%s)", errno, fd_io_strerror( errno ) ));
+-    return -1;
+-  }
+-  return WIFEXITED( status ) && !WEXITSTATUS( status ) ? 0 : -1;
+-}
+-
+ struct fd_mlx5_pd {
+   fd_uverbs_ctx_t * ctx;    /* uverbs context */
+   uint              handle; /* protection domain handle */
+diff --git a/src/disco/net/mlx5/fd_mlx5.h b/src/disco/net/mlx5/fd_mlx5.h
+index dc51fcb575b..96fe35d15ca 100644
+--- a/src/disco/net/mlx5/fd_mlx5.h
++++ b/src/disco/net/mlx5/fd_mlx5.h
+@@ -22,12 +22,6 @@ fd_mlx5_rdma_dev_find( char         rdma_name[ FD_MLX5_RDMA_NAME_MAX ],
+ int
+ fd_mlx5_uverbs_avail( void );
+ 
+-/* fd_mlx5_uverbs_modprobe invokes modprobe for ib_uverbs.  is_dry_run=1
+-   checks module availability without loading it, is_dry_run=0 loads it.
+-   Returns 0 if modprobe succeeds, otherwise -1. */
+-int
+-fd_mlx5_uverbs_modprobe( int is_dry_run );
+-
+ FD_PROTOTYPES_END
+ 
+ #endif /* defined(__linux__) */

@@ -1,0 +1,44 @@
+{
+  "status": "experimental; measured runtime qualification only",
+  "hardware": "Intel X710, i40e PF, native iAVF VF",
+  "scope": "runtime-only, no automatic boot/recovery qualification",
+  "source": {
+    "pr_head": "696316b2d4deea93565c12f4b7022fd5ff65d41e",
+    "fix_commit": "db6637e708e24c54b331c7cdeabca0767c7169c9",
+    "voting_release_base": "6286f99e400c1d5ac6f95b8cf36491555faa3726",
+    "voting_backport_included": true
+  },
+  "comparison": {
+    "baseline": "historical AF_XDP zero-copy voting hour",
+    "candidate": "v26.10.5 native iAVF backport voting hour",
+    "samples_each": 361,
+    "validator_system_cpu_cores": {
+      "baseline": 0.02610255389931515,
+      "candidate": 0.0034804313787888757
+    },
+    "validator_total_cpu_cores": {
+      "baseline": 28.006570609622475,
+      "candidate": 28.008630551776108
+    },
+    "host_softirq_cores": {
+      "baseline": 0.01643304024623252,
+      "candidate": 0.000999999997098057
+    }
+  },
+  "preconditions": [
+    "exclusive VF IOMMU group",
+    "VF only bound to vfio-pci",
+    "independent management",
+    "exact scoped filter readback",
+    "known-good fallback and latest signed vote history"
+  ],
+  "limitations": [
+    "39 versus 38 configured tiles",
+    "different builds and compiler/ISA choices",
+    "different workload and cache state",
+    "no controlled throughput, latency or leader-burst test",
+    "Linux RX drops increased; not zero loss",
+    "15-minute PR-head trial was unstaked; voting hour used release derivative"
+  ],
+  "automation": "Local source reconstruction and isolated container build scripts only; no automated hardware activation. RUNBOOK.md distinguishes inspection from mutation."
+}

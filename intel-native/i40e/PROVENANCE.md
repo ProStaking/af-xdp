@@ -1,0 +1,9 @@
+# Provenance and license boundaries
+
+This directory is an addition to ProStaking/af-xdp, separate from the earlier AF_XDP experiment. It contains aggregate results and sanitized configuration placeholders, not raw host logs or credentials.
+
+`semantic-rule.patch` changes Firedancer-derived source and carries upstream Apache-2.0 obligations. Retain `LICENSE.upstream` and `NOTICE.upstream`; do not relabel upstream code as original MIT material. The native networking implementation is the work in upstream PR12540. Our submitted contribution is the narrow semantic rule comparison and regression coverage.
+
+Original explanatory documentation and aggregate measurements are intended to follow the repository's existing CC BY 4.0 terms. Original configuration examples follow its MIT terms only to the extent they are original material; measured settings are not a claim of independently authored upstream configuration syntax or service design. Root license files must accompany this directory in the eventual repository addition. This candidate does not change existing licenses or grant rights in third-party material.
+
+The complete experimental release backport is included under source/release/. Its ordered two-patch series reconstructs the tested release source. The eight original author-bearing upstream patches are retained as provenance inputs, with original copyright and notices preserved. Release adaptations and the semantic readback correction are local modifications made for this experiment (November 2026); they are identified by the resolved patch series and the 65-file tested-source manifest. This derivative is not a claim that upstream has merged or approved these changes. The root semantic-rule.patch remains only the separately submitted narrow contribution. No private source logs, key material, management addresses, host guards or binary payloads are bundled.

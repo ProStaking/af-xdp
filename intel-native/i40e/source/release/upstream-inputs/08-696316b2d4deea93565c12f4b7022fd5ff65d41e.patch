@@ -1,0 +1,358 @@
+From 696316b2d4deea93565c12f4b7022fd5ff65d41e Mon Sep 17 00:00:00 2001
+From: Tristan Carter <trcarterintern@jumptrading.com>
+Date: Thu, 22 Oct 2026 14:51:55 +0000
+Subject: [PATCH] net: add iavf to auto net
+
+---
+ src/app/shared/commands/configure/iavf.c | 21 ++++--
+ src/app/shared/fd_auto_net.c             | 83 +++++++++++++++++++++++-
+ src/app/shared/test_auto_net.c           | 32 +++++++++
+ src/disco/net/iavf/fd_iavf.c             | 64 ++++++++++++++++++
+ src/disco/net/iavf/fd_iavf.h             | 13 ++--
+ 5 files changed, 204 insertions(+), 9 deletions(-)
+
+diff --git a/src/app/shared/commands/configure/iavf.c b/src/app/shared/commands/configure/iavf.c
+index 49de75cefe3..d0b3bc8dc88 100644
+--- a/src/app/shared/commands/configure/iavf.c
++++ b/src/app/shared/commands/configure/iavf.c
+@@ -661,6 +661,15 @@ iavf_pf_config_check( fd_config_t const * config,
+   int fini_check = check_type==FD_CONFIGURE_CHECK_TYPE_FINI_PERM ||
+                    check_type==FD_CONFIGURE_CHECK_TYPE_PRE_FINI  ||
+                    check_type==FD_CONFIGURE_CHECK_TYPE_POST_FINI;
++  if( !fini_check && FD_UNLIKELY( -1==fd_iavf_ari_check( pf_if ) ) ) {
++    int err = errno;
++    if( err==EOPNOTSUPP ) {
++      FD_LOG_ERR(( "iavf provider requires PCIe ARI forwarding, but on PF %s ARI is disabled. "
++                   "Please either enable ARI on the device or set [net.provider] to \"auto\"", pf_if ));
++    }
++    FD_LOG_ERR(( "Reading ARI forwarding status for PF %s from /sys/class/net/%s/device/ari_enabled failed (%i-%s)",
++                 pf_if, pf_if, err, fd_io_strerror( err ) ));
++  }
+   /* A PF's only VF is removed by configure fini. Report it before checking
+      ntuple rules so missing rules cannot cause fini to skip VF removal */
+   if( fini_check && numvfs==1U ) {
+@@ -669,12 +678,15 @@ iavf_pf_config_check( fd_config_t const * config,
+   if( !fini_check && 0==numvfs ) {
+     if( FD_UNLIKELY( -1==fd_iavf_sriov_resources_check( pf_if ) ) ) {
+       int err = errno;
++      if( err==ENOSPC ) {
++        FD_LOG_ERR(( "Cannot create VF 0 on PF %s. The VF's PCI bus number is outside the parent bridge's assigned range", pf_if ));
++      }
+       if( err==ENOMEM ) {
+         FD_LOG_ERR(( "The system has not reserved PCIe memory for VFs on PF %s.\n\n"
+                      "  %s", pf_if, fd_iavf_sriov_bios_guide( 0 ) ));
+       }
+-      FD_LOG_ERR(( "Checking VF PCIe memory resources for PF %s failed (%i-%s). "
+-                   "Check that /sys/class/net/%s/device/resource is accessible.",
++      FD_LOG_ERR(( "Checking VF PCIe resources for PF %s failed (%i-%s). "
++                   "Check that the PCI sysfs files under /sys/class/net/%s/device are accessible.",
+                    pf_if, err, fd_io_strerror( err ), pf_if ));
+     }
+     NOT_CONFIGURED( "PF %s has no VFs", pf_if );
+@@ -858,8 +870,9 @@ init( fd_config_t const * config ) {
+   if( -1==fd_iavf_member_interfaces( config->net.interface, members, &member_cnt ) ) {
+     FD_LOG_ERR(( "Discovering PFs for interface %s failed (%i-%s)", config->net.interface, errno, fd_io_strerror( errno ) ));
+   }
+-  /* Resolve every PF's iommu_group and check VF BAR allocations on PFs with
+-     sriov_numvfs==0 before creating any VF or replacing any PF ntuple rules */
++  /* Resolve every PF's iommu_group and check VF bus numbers and BAR
++     allocations on PFs with sriov_numvfs==0 before creating any VF or
++     replacing any PF ntuple rules */
+   int member_configured[ FD_IAVF_MEMBER_MAX ];
+   for( ulong i=0UL; i<member_cnt; i++ ) {
+     char const * diagnostic;
+diff --git a/src/app/shared/fd_auto_net.c b/src/app/shared/fd_auto_net.c
+index 581a67b9ec8..c0d12c0162e 100644
+--- a/src/app/shared/fd_auto_net.c
++++ b/src/app/shared/fd_auto_net.c
+@@ -1,7 +1,9 @@
+ #include "fd_auto_net.h"
+ #include "../platform/fd_sys_util.h"
++#include "commands/configure/fd_ethtool_ioctl.h"
+ #include "../../disco/net/fd_linux_bond.h"
+ #include "../../disco/net/fd_net_tile.h"
++#include "../../disco/net/iavf/fd_iavf.h"
+ #include "../../disco/net/mlx5/fd_mlx5.h"
+ #include "../../disco/netlink/fd_netlink_tile.h"
+ #include "../../waltz/mib/fd_netdev_netlink.h"
+@@ -14,7 +16,7 @@
+ #include <sys/utsname.h>
+ #include <linux/if_arp.h>
+ 
+-#define PROVIDER_CNT       ( 2UL)
++#define PROVIDER_CNT       ( 3UL)
+ #define FEAT_CNT_MAX       (16UL)
+ #define NET_DRIVER_CNT_MAX (16UL)
+ 
+@@ -33,6 +35,9 @@ struct fd_auto_info {
+   int  has_mlx5_rdma_port;
+   int  has_uverbs;
+   int  has_uverbs_module;
++  int  iavf_pf_checks_passed;
++  int  has_vfio;
++  int  has_vfio_module;
+ };
+ typedef struct fd_auto_info fd_auto_info_t;
+ 
+@@ -267,6 +272,34 @@ mlx5_apply( fd_config_t * config ) {
+   fd_memcpy( config->net.provider, "mlx5", 5 );
+ }
+ 
++/* iavf tile checks/apply */
++static int
++iavf_check( fd_config_t    const * config,
++            fd_auto_info_t const * info ) {
++  if( 0!=strcmp( config->net.provider, "auto" ) ) return 0;
++
++  if( !info->iavf_pf_checks_passed ) return 0;
++  if( !info->has_vfio && !info->has_vfio_module ) return 0;
++
++  if( info->is_bonded_if ) {
++    /* Linux ice driver started allowing LACP bonds in combination with
++       SR-IOV from Linux v6.5.
++       https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=1c769b1a303f7a3b447fc7244340b77823bdbfdc */
++    static fd_auto_driver_rq_t const iavf_lacp_drivers[ NET_DRIVER_CNT_MAX ] = {
++      { "ice",  6,  5, 0, 0 },
++      { "i40e", 5, 14, 0, 0 }
++    };
++    if( 0==fd_auto_check_driver( info, iavf_lacp_drivers ) ) return 0;
++  }
++
++  return 1;
++}
++
++static void
++iavf_apply( fd_config_t * config ) {
++  fd_memcpy( config->net.provider, "iavf", 5 );
++}
++
+ /* Each feature's supported Linux version matrix per driver decided
+    based on fd-linux-version-testbed test results. */
+ static const fd_auto_provider_t NET_PROVIDERS[] = {
+@@ -276,6 +309,15 @@ static const fd_auto_provider_t NET_PROVIDERS[] = {
+     .check = mlx5_check,
+     .apply = mlx5_apply
+   },
++  {
++    .name = "iavf",
++    .supported_drivers = {
++      { "ice",  5, 14, 0, 0 },
++      { "i40e", 5, 14, 0, 0 }
++    },
++    .check = iavf_check,
++    .apply = iavf_apply
++  },
+   {
+     .name  = "xdp",
+     .check = xdp_check,
+@@ -437,6 +479,34 @@ scrape_networking( fd_auto_info_t * info,
+   }
+ }
+ 
++static int
++scrape_iavf_pfs( char const * if_name ) {
++  char members[ FD_IAVF_MEMBER_MAX ][ IF_NAMESIZE ];
++  ulong member_cnt;
++  if( FD_UNLIKELY( -1==fd_iavf_member_interfaces( if_name, members, &member_cnt ) ) ) return 0;
++
++  /* Each PF needs ARI, an IOMMU, PCIe resources for VFs and ntuple filtering */
++  for( ulong i=0UL; i<member_cnt; i++ ) {
++    uint numvfs;
++    if( FD_UNLIKELY( -1==fd_iavf_iommu_check( members[i], NULL ) ) ) return 0;
++    if( FD_UNLIKELY( -1==fd_iavf_ari_check( members[i] ) ) ) return 0;
++    if( FD_UNLIKELY( -1==fd_iavf_numvfs_get( members[i], &numvfs ) ) ) return 0;
++    if( FD_UNLIKELY( 0==numvfs && -1==fd_iavf_sriov_resources_check( members[i] ) ) ) return 0;
++
++    fd_ethtool_ioctl_t ioc;
++    if( FD_UNLIKELY( NULL==fd_ethtool_ioctl_init( &ioc, members[i] ) ) ) return 0;
++
++    /* Only select IAVF automatically if ntuple filtering is enabled */
++    int ntuple_enabled;
++    int err = fd_ethtool_ioctl_feature_test( &ioc, FD_ETHTOOL_FEATURE_NTUPLE, &ntuple_enabled );
++    fd_ethtool_ioctl_fini( &ioc );
++
++    if( FD_UNLIKELY( 0!=err ) ) return 0;
++    if( FD_UNLIKELY( !ntuple_enabled ) ) return 0;
++  }
++  return 1;
++}
++
+ static fd_auto_info_t
+ fd_auto_scrape_info( fd_config_t const * config ) {
+   fd_auto_info_t info = {0};
+@@ -450,6 +520,17 @@ fd_auto_scrape_info( fd_config_t const * config ) {
+     info.has_uverbs_module = 0==fd_sys_util_modprobe( "ib_uverbs", 1 );
+   }
+ 
++  if( 0==strcmp( config->net.provider, "auto" ) ) {
++    info.iavf_pf_checks_passed = scrape_iavf_pfs( config->net.interface );
++    if( info.iavf_pf_checks_passed ) {
++      if( fd_iavf_vfio_avail() ) {
++        info.has_vfio = 0==fd_iavf_vfio_api_check( NULL );
++      } else {
++        info.has_vfio_module = 0==fd_sys_util_modprobe( "vfio-pci", 1 );
++      }
++    }
++  }
++
+   return info;
+ }
+ 
+diff --git a/src/app/shared/test_auto_net.c b/src/app/shared/test_auto_net.c
+index 831f3da5090..ecf808c28c5 100644
+--- a/src/app/shared/test_auto_net.c
++++ b/src/app/shared/test_auto_net.c
+@@ -75,6 +75,38 @@ main( int     argc,
+   fd_auto_net_apply( config, &info_uverbs_module );
+   FD_TEST( 0==strcmp( config->net.provider, "mlx5" ) );
+ 
++  /* IAVF kernel, PF and VFIO requirements */
++  struct {
++    char const * driver;
++    ulong linux_major, linux_minor;
++    int iavf_pf_checks_passed, has_vfio, has_vfio_module;
++    uint net_tile_cnt;
++    uint is_bonded_if:1;
++    char const * provider;
++  } const iavf_cases[] = {
++    { "ice",  5, 14, 1, 1, 0, (uint)FD_IAVF_TILE_MAX,    0U, "iavf" },
++    { "i40e", 5, 13, 1, 1, 0, 1U,                       0U, "xdp"  },
++    { "i40e", 6,  0, 1, 1, 0, 1U,                       0U, "iavf" },
++    { "ice",  6,  0, 0, 1, 0, 1U,                       0U, "xdp"  },
++    { "ice",  6,  0, 1, 0, 0, 1U,                       0U, "xdp"  },
++    { "ice",  6,  0, 1, 0, 1, 1U,                       0U, "iavf" },
++    { "ice",  5, 14, 1, 1, 0, 1U,                       1U, "xdp"  },
++    { "ice",  6,  4, 1, 1, 0, 1U,                       1U, "xdp"  },
++    { "ice",  6,  5, 1, 1, 0, 1U,                       1U, "iavf" },
++    { "ice",  7,  0, 1, 1, 0, 1U,                       1U, "iavf" },
++    { "i40e", 5, 14, 1, 1, 0, 1U,                       1U, "iavf" }
++  };
++  for( ulong i=0UL; i<sizeof(iavf_cases)/sizeof(iavf_cases[0]); i++ ) {
++    fd_auto_info_t info = { .linux_major=iavf_cases[i].linux_major, .linux_minor=iavf_cases[i].linux_minor,
++                           .is_bonded_if=iavf_cases[i].is_bonded_if,
++                           .iavf_pf_checks_passed=iavf_cases[i].iavf_pf_checks_passed, .has_vfio=iavf_cases[i].has_vfio,
++                           .has_vfio_module=iavf_cases[i].has_vfio_module };
++    strcpy( info.driver, iavf_cases[i].driver );
++    reset_provider_auto( iavf_cases[i].net_tile_cnt );
++    fd_auto_net_apply( config, &info );
++    FD_TEST( 0==strcmp( config->net.provider, iavf_cases[i].provider ) );
++  }
++
+   /* Explicit providers bypass automatic provider requirements. */
+ 
+   reset_auto( 1U );
+diff --git a/src/disco/net/iavf/fd_iavf.c b/src/disco/net/iavf/fd_iavf.c
+index c68a1fe5d7f..9f5eb54561c 100644
+--- a/src/disco/net/iavf/fd_iavf.c
++++ b/src/disco/net/iavf/fd_iavf.c
+@@ -726,6 +726,19 @@ fd_iavf_iommu_check( char const *  pf_if,
+   return -1;
+ }
+ 
++int
++fd_iavf_ari_check( char const * pf_if ) {
++  char path[ PATH_MAX ];
++  FD_TEST( fd_cstr_printf_check( path, sizeof(path), NULL, "/sys/class/net/%s/device/ari_enabled", pf_if ) );
++  ulong enabled;
++  if( FD_UNLIKELY( -1==fd_iavf_read_ulong( path, 10, &enabled ) ) ) return -1;
++  if( FD_UNLIKELY( enabled!=1UL ) ) {
++    errno = enabled==0UL ? EOPNOTSUPP : EPROTO;
++    return -1;
++  }
++  return 0;
++}
++
+ int
+ fd_iavf_numvfs_get( char const * pf_if,
+                     uint *       numvfs ) {
+@@ -741,8 +754,59 @@ fd_iavf_numvfs_get( char const * pf_if,
+   return 0;
+ }
+ 
++static int
++fd_iavf_sriov_bus_check( char const * pf_if ) {
++  char path[ PATH_MAX ];
++  FD_TEST( fd_cstr_printf_check( path, sizeof(path), NULL, "/sys/class/net/%s/device/sriov_offset", pf_if ) );
++  ulong vf_offset;
++  if( FD_UNLIKELY( -1==fd_iavf_read_ulong( path, 10, &vf_offset ) ) ) return -1;
++  if( FD_UNLIKELY( 0==vf_offset || vf_offset>USHRT_MAX ) ) {
++    errno = EPROTO;
++    return -1;
++  }
++
++  FD_TEST( fd_cstr_printf_check( path, sizeof(path), NULL, "/sys/class/net/%s/device", pf_if ) );
++  char pci_addr[ FD_IAVF_PCI_ADDR_SZ ];
++  if( FD_UNLIKELY( -1==fd_iavf_read_link_name( pci_addr, sizeof(pci_addr), path, 0 ) ||
++                   -1==fd_iavf_pci_addr_normalize( pci_addr, pci_addr ) ) ) return -1;
++
++  ulong pf_bus      = strtoul( pci_addr+5,  NULL, 16 );
++  ulong pf_device   = strtoul( pci_addr+8,  NULL, 16 );
++  ulong pf_function = strtoul( pci_addr+11, NULL, 16 );
++  /* VF 0's function offset can carry into a higher PCI bus number */
++  ulong vf_bus = pf_bus+((pf_device*8UL+pf_function+vf_offset)>>8);
++  if( vf_bus==pf_bus ) return 0;
++
++  /* Check VF 0's bus against the parent bridge's assigned bus range */
++  FD_TEST( fd_cstr_printf_check( path, sizeof(path), NULL, "/sys/class/net/%s/device/../config", pf_if ) );
++  int fd = open( path, O_RDONLY|O_CLOEXEC );
++  if( FD_UNLIKELY( -1==fd ) ) return -1;
++  uchar config[ PCI_SUBORDINATE_BUS+1 ];
++  ssize_t read_sz = pread( fd, config, sizeof(config), 0 );
++  int     err     = 0;
++  if( FD_UNLIKELY( -1==read_sz ) )                         err = errno;
++  else if( FD_UNLIKELY( (ulong)read_sz!=sizeof(config) ) ) err = EPROTO;
++  if( FD_UNLIKELY( -1==close( fd ) && 0==err ) )           err = errno;
++  if( FD_UNLIKELY( 0!=err ) ) {
++    errno = err;
++    return -1;
++  }
++  if( FD_UNLIKELY( (config[ PCI_HEADER_TYPE ] & 0x7fU)!=PCI_HEADER_TYPE_BRIDGE ||
++                   config[ PCI_SECONDARY_BUS ]!=pf_bus ) ) {
++    errno = EPROTO;
++    return -1;
++  }
++  if( FD_UNLIKELY( vf_bus>config[ PCI_SUBORDINATE_BUS ] ) ) {
++    errno = ENOSPC;
++    return -1;
++  }
++  return 0;
++}
++
+ int
+ fd_iavf_sriov_resources_check( char const * pf_if ) {
++  if( FD_UNLIKELY( -1==fd_iavf_sriov_bus_check( pf_if ) ) ) return -1;
++
+   char path[ PATH_MAX ];
+   FD_TEST( fd_cstr_printf_check( path, sizeof(path), NULL, "/sys/class/net/%s/device/resource", pf_if ) );
+   FILE * file = fopen( path, "re" );
+diff --git a/src/disco/net/iavf/fd_iavf.h b/src/disco/net/iavf/fd_iavf.h
+index d324d026588..9a6537fd379 100644
+--- a/src/disco/net/iavf/fd_iavf.h
++++ b/src/disco/net/iavf/fd_iavf.h
+@@ -63,6 +63,12 @@ int
+ fd_iavf_iommu_check( char const *  pf_if,
+                      char const ** diagnostic );
+ 
++/* fd_iavf_ari_check requires ARI forwarding on pf_if's PCI bus.
++   Reads ari_enabled and returns 0 on success or -1 with errno set,
++   including EOPNOTSUPP when disabled. Does not log failures. */
++int
++fd_iavf_ari_check( char const * pf_if );
++
+ /* fd_iavf_numvfs_get reads pf_if's enabled VF count from sriov_numvfs.
+    A count of zero is valid. Returns 0 on success or -1 with errno set,
+    leaving numvfs unchanged on failure. Does not log failures. */
+@@ -70,10 +76,9 @@ int
+ fd_iavf_numvfs_get( char const * pf_if,
+                     uint *       numvfs );
+ 
+-/* fd_iavf_sriov_resources_check requires assigned VF BAR0 and BAR3 memory
+-   ranges in pf_if's PCI resource file. Returns 0 on success or -1 with
+-   errno set, including ENOMEM for missing or unusable allocations.
+-   Only reads sysfs and does not log failures or create VFs. */
++/* fd_iavf_sriov_resources_check requires a PCI bus number for VF 0 and
++   assigned VF BAR0 and BAR3 memory ranges. Returns 0 on success or -1
++   on failure. Only reads sysfs and does not log failures or create VFs. */
+ int
+ fd_iavf_sriov_resources_check( char const * pf_if );
+ 

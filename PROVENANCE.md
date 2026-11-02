@@ -13,3 +13,7 @@ Pinned upstream Firedancer is Apache-2.0 unless otherwise noted; retain its [LIC
 ## Broadcom P4 experiment
 
 See [P4 provenance](bnxt-p4/PROVENANCE.md), [source reconstruction](bnxt-p4/results/source-reconstruction.json), and [bounded result](bnxt-p4/results/firedancer-unstaked.json). This addition includes verified source patches, not driver/validator binaries or a vendor installer. It establishes sustained advancing unstaked replay, not catch-up, voting readiness or performance improvement.
+
+## Native Intel X710 / i40e
+
+See [native Intel provenance](intel-native/i40e/PROVENANCE.md) for the original author-bearing Intel patches, resolved release adaptation series, separately submitted semantic-rule fix and retained Apache-2.0 notices. No native Intel binary or private host logs are distributed.

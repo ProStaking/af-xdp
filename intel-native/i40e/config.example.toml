@@ -1,0 +1,58 @@
+# Tested release-layout example. Replace every YOUR_* value before use.
+user = "YOUR_SERVICE_USER"
+name = "iavf-trial"
+telemetry = false
+[paths]
+base = "/YOUR_STATE_DIRECTORY"
+identity_key = "/YOUR_UNSTAKED_IDENTITY.json"
+vote_account = "YOUR_PUBLIC_VOTE_ACCOUNT"
+vote_history = "/YOUR_STATE_DIRECTORY/vote-history"
+[accounts]
+max_accounts = 200000000
+cache_size_gib = 12
+[layout]
+affinity = "auto"
+enable_block_production = true
+enable_snapshot_production = false
+net_tile_count = 1
+execrp_tile_count = 4
+snapdc_tile_count = 1
+snapin_tile_count = 1
+shred_tile_count = 2
+[tiles.gui]
+enabled = false
+[tiles.rpc]
+enabled = true
+rpc_listen_address = "127.0.0.1"
+rpc_listen_port = 8899
+
+[net]
+provider = "iavf"
+interface = "YOUR_X710_PF"
+bind_address = "YOUR_PUBLIC_IPV4"
+[hugetlbfs]
+mount_path = "/YOUR_HUGETLBFS_ROOT"
+[snapshots.server]
+enabled = false
+[tiles.metric]
+prometheus_listen_address = "127.0.0.1"
+
+[log]
+path = "/YOUR_STATE_DIRECTORY/logs/firedancer.log"
+[development]
+sandbox = true
+core_dump = "disabled"
+
+[consensus]
+expected_genesis_hash = "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY"
+alpenglow = true
+[snapshots.sources]
+servers = []
+[snapshots.sources.gossip]
+allow_any = false
+allow_list = ["YOUR_TRUSTED_TESTNET_SNAPSHOT_IDENTITY"]
+
+
+[net.iavf]
+rx_queue_size = 4096
+tx_queue_size = 4096

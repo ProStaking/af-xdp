@@ -1,0 +1,207 @@
+diff --git a/src/app/shared/Local.mk b/src/app/shared/Local.mk
+index 9084fc9..9574d11 100644
+--- a/src/app/shared/Local.mk
++++ b/src/app/shared/Local.mk
+@@ -12,6 +12,8 @@ $(call make-unit-test,test_auto_net,test_auto_net,fd_fdctl fdctl_shared fdctl_pl
+ $(call run-unit-test,test_auto_net)
+ $(call make-unit-test,test_config_json,test_config_json,fd_fdctl fdctl_shared fdctl_platform fd_disco fd_waltz fd_ballet fd_tango fd_util)
+ $(call run-unit-test,test_config_json)
++$(call make-unit-test,test_iavf_rule,test_iavf_rule,fd_util)
++$(call run-unit-test,test_iavf_rule)
+ $(call make-fuzz-test,fuzz_fdctl_config,fuzz_fdctl_config,fd_fdctl fdctl_shared fdctl_platform fd_disco fd_waltz fd_ballet fd_tango fd_util)
+ 
+ $(call add-objs,boot/fd_boot,fdctl_shared)
+diff --git a/src/app/shared/commands/configure/fd_iavf_rule.h b/src/app/shared/commands/configure/fd_iavf_rule.h
+new file mode 100644
+index 0000000..a9d4233
+--- /dev/null
++++ b/src/app/shared/commands/configure/fd_iavf_rule.h
+@@ -0,0 +1,42 @@
++#ifndef HEADER_fd_src_app_shared_commands_configure_fd_iavf_rule_h
++#define HEADER_fd_src_app_shared_commands_configure_fd_iavf_rule_h
++
++#include <linux/ethtool.h>
++
++/* This stage supports only plain UDP/IPv4 drop rules.  Even without
++   FLOW_EXT/FLOW_MAC_EXT, reject unexpected extension fields.  Reserved
++   structure padding is not part of the rule. */
++static inline int
++iavf_pf_ntuple_ext_empty( struct ethtool_flow_ext const * ext ) {
++  return !( ext->h_dest[0] | ext->h_dest[1] | ext->h_dest[2] |
++            ext->h_dest[3] | ext->h_dest[4] | ext->h_dest[5] |
++            ext->vlan_etype | ext->vlan_tci | ext->data[0] | ext->data[1] );
++}
++
++static inline int
++iavf_pf_ntuple_rule_equal( struct ethtool_rx_flow_spec const * a,
++                           struct ethtool_rx_flow_spec const * b ) {
++  if( a->flow_type!=UDP_V4_FLOW || b->flow_type!=UDP_V4_FLOW ||
++      a->ring_cookie!=RX_CLS_FLOW_DISC || b->ring_cookie!=RX_CLS_FLOW_DISC ||
++      a->location!=b->location ) return 0;
++  if( !iavf_pf_ntuple_ext_empty( &a->h_ext ) ||
++      !iavf_pf_ntuple_ext_empty( &a->m_ext ) ||
++      !iavf_pf_ntuple_ext_empty( &b->h_ext ) ||
++      !iavf_pf_ntuple_ext_empty( &b->m_ext ) ) return 0;
++
++  /* i40e readback can populate IPv6 mask members for an IPv4 flow.
++     Compare every selected UDP/IPv4 field, not the inactive union tail
++     or structure padding.  In particular, retain exact source and TOS
++     masks so a narrower or broader rule cannot satisfy this check. */
++  struct ethtool_tcpip4_spec const * ah = &a->h_u.udp_ip4_spec;
++  struct ethtool_tcpip4_spec const * bh = &b->h_u.udp_ip4_spec;
++  struct ethtool_tcpip4_spec const * am = &a->m_u.udp_ip4_spec;
++  struct ethtool_tcpip4_spec const * bm = &b->m_u.udp_ip4_spec;
++  return ah->ip4src==bh->ip4src && am->ip4src==bm->ip4src &&
++         ah->ip4dst==bh->ip4dst && am->ip4dst==bm->ip4dst &&
++         ah->psrc  ==bh->psrc   && am->psrc  ==bm->psrc   &&
++         ah->pdst  ==bh->pdst   && am->pdst  ==bm->pdst   &&
++         ah->tos   ==bh->tos    && am->tos   ==bm->tos;
++}
++
++#endif /* HEADER_fd_src_app_shared_commands_configure_fd_iavf_rule_h */
+diff --git a/src/app/shared/commands/configure/iavf.c b/src/app/shared/commands/configure/iavf.c
+index d0b3bc8..b01bc26 100644
+--- a/src/app/shared/commands/configure/iavf.c
++++ b/src/app/shared/commands/configure/iavf.c
+@@ -2,6 +2,7 @@
+ 
+ #include "configure.h"
+ #include "fd_ethtool_ioctl.h"
++#include "fd_iavf_rule.h"
+ #include "../../../platform/fd_file_util.h"
+ #include "../../../platform/fd_sys_util.h"
+ #include "../../../../disco/net/iavf/fd_iavf.h"
+@@ -573,17 +574,6 @@ iavf_pf_ntuple_rule_get( fd_ethtool_ioctl_t *          ioc,
+   return 0;
+ }
+ 
+-static int
+-iavf_pf_ntuple_rule_equal( struct ethtool_rx_flow_spec const * a,
+-                           struct ethtool_rx_flow_spec const * b ) {
+-  return a->flow_type==b->flow_type && a->ring_cookie==b->ring_cookie &&
+-         a->location==b->location &&
+-         0==memcmp( &a->h_u,   &b->h_u,   sizeof(a->h_u)   ) &&
+-         0==memcmp( &a->m_u,   &b->m_u,   sizeof(a->m_u)   ) &&
+-         0==memcmp( &a->h_ext, &b->h_ext, sizeof(a->h_ext) ) &&
+-         0==memcmp( &a->m_ext, &b->m_ext, sizeof(a->m_ext) );
+-}
+-
+ /* iavf_pf_ntuple_drop_rule_build returns a drop rule for the given UDP/IPv4
+    destination port. The PF drops suppress kernel delivery, while fd_iavf_init
+    installs the VF receive MAC filter separately. */
+diff --git a/src/app/shared/test_iavf_rule.c b/src/app/shared/test_iavf_rule.c
+new file mode 100644
+index 0000000..9e3ec90
+--- /dev/null
++++ b/src/app/shared/test_iavf_rule.c
+@@ -0,0 +1,110 @@
++#include "commands/configure/fd_iavf_rule.h"
++#include "../../util/fd_util.h"
++#include <arpa/inet.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++static ulong rejected;
++static void
++reject_both( struct ethtool_rx_flow_spec const * expected,
++             struct ethtool_rx_flow_spec const * changed ) {
++  FD_TEST( !iavf_pf_ntuple_rule_equal( expected, changed ) );
++  FD_TEST( !iavf_pf_ntuple_rule_equal( changed, expected ) );
++  rejected++;
++}
++
++int
++main( void ) {
++  /* No fd_boot or host I/O: this test operates only on UAPI structs.
++     Fixture from X710/i40e on Ubuntu 7.0.0-42.42, 2026-11-01.
++     Only the destination address is sanitized to TEST-NET-1. */
++  struct ethtool_rx_flow_spec expected = {0};
++  expected.flow_type   = UDP_V4_FLOW;
++  expected.ring_cookie = RX_CLS_FLOW_DISC;
++  expected.location   = 7679U;
++  FD_TEST( inet_pton( AF_INET, "192.0.2.17", &expected.h_u.udp_ip4_spec.ip4dst )==1 );
++  expected.h_u.udp_ip4_spec.pdst   = htons( 49073U );
++  expected.m_u.udp_ip4_spec.ip4dst = htonl( UINT32_MAX );
++  expected.m_u.udp_ip4_spec.pdst   = htons( UINT16_MAX );
++  struct ethtool_rx_flow_spec captured = expected;
++  static uchar const captured_mask[52] = {
++    0,0,0,0,255,255,255,255,0,0,255,255,0,0,0,0,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
++  };
++  FD_TEST( sizeof(captured.m_u)==sizeof(captured_mask) );
++  memcpy( &captured.m_u, captured_mask, sizeof(captured_mask) );
++  FD_TEST( memcmp( &expected.m_u, &captured.m_u, sizeof(expected.m_u) ) );
++  FD_TEST( iavf_pf_ntuple_rule_equal( &expected, &captured ) );
++  FD_TEST( iavf_pf_ntuple_rule_equal( &captured, &expected ) );
++  FD_TEST( iavf_pf_ntuple_rule_equal( &expected, &expected ) );
++
++  /* Mutate each bit of every meaningful header and mask field. */
++# define FIELD(member) do { \
++    for( ulong byte=0UL; byte<sizeof(captured.member); byte++ ) \
++      for( uint bit=0U; bit<8U; bit++ ) { \
++        struct ethtool_rx_flow_spec bad = captured; \
++        ((uchar *)&bad.member)[byte] ^= (uchar)(1U<<bit); \
++        reject_both( &expected, &bad ); \
++      } \
++  } while(0)
++  FIELD(h_u.udp_ip4_spec.ip4src); FIELD(h_u.udp_ip4_spec.ip4dst);
++  FIELD(h_u.udp_ip4_spec.psrc);   FIELD(h_u.udp_ip4_spec.pdst); FIELD(h_u.udp_ip4_spec.tos);
++  FIELD(m_u.udp_ip4_spec.ip4src); FIELD(m_u.udp_ip4_spec.ip4dst);
++  FIELD(m_u.udp_ip4_spec.psrc);   FIELD(m_u.udp_ip4_spec.pdst); FIELD(m_u.udp_ip4_spec.tos);
++  FIELD(flow_type); FIELD(ring_cookie); FIELD(location);
++  FIELD(h_ext.h_dest); FIELD(h_ext.vlan_etype); FIELD(h_ext.vlan_tci); FIELD(h_ext.data);
++  FIELD(m_ext.h_dest); FIELD(m_ext.vlan_etype); FIELD(m_ext.vlan_tci); FIELD(m_ext.data);
++# undef FIELD
++
++  /* Equal unsupported types, actions and extensions must still reject. */
++  for( uint type=0U; type<32U; type++ ) {
++    if( type==UDP_V4_FLOW ) continue;
++    struct ethtool_rx_flow_spec bad = expected;
++    bad.flow_type = type;
++    reject_both( &bad, &bad );
++  }
++  for( uint bit=5U; bit<32U; bit++ ) {
++    struct ethtool_rx_flow_spec bad = expected;
++    bad.flow_type |= 1U<<bit;
++    reject_both( &bad, &bad );
++  }
++  struct ethtool_rx_flow_spec bad = expected;
++  bad.ring_cookie = 0UL; reject_both( &bad, &bad );
++  bad = expected; bad.h_ext.data[0] = 1U; reject_both( &bad, &bad );
++  bad = expected; bad.m_ext.vlan_tci = htons( 0xffffU ); reject_both( &bad, &bad );
++
++  /* Inactive union bytes and reserved padding are not selectors. */
++  for( ulong i=sizeof(struct ethtool_tcpip4_spec); i<sizeof(captured.m_u); i++ ) {
++    bad = captured; ((uchar *)&bad.m_u)[i] ^= 0x5aU;
++    ((uchar *)&bad.h_u)[i] ^= 0xa5U;
++    FD_TEST( iavf_pf_ntuple_rule_equal( &expected, &bad ) );
++  }
++  bad = captured;
++  memset( &bad.h_ext, 0, sizeof(bad.h_ext) );
++  memset( &bad.m_ext, 0, sizeof(bad.m_ext) );
++  ((uchar *)&bad.h_ext)[0] = 0x55U; /* UAPI padding[2] */
++  ((uchar *)&bad.m_ext)[1] = 0xaaU;
++  FD_TEST( iavf_pf_ntuple_rule_equal( &expected, &bad ) );
++  /* Bind-address wildcard is supported, but must not match an exact-IP
++     rule.  The destination port mask remains exact in either mode. */
++  struct ethtool_rx_flow_spec wildcard = expected;
++  wildcard.h_u.udp_ip4_spec.ip4dst = 0U;
++  wildcard.m_u.udp_ip4_spec.ip4dst = 0U;
++  FD_TEST( iavf_pf_ntuple_rule_equal( &wildcard, &wildcard ) );
++  reject_both( &wildcard, &expected );
++  bad = wildcard; bad.m_u.udp_ip4_spec.pdst = 0U;
++  reject_both( &wildcard, &bad );
++
++  /* The IPv4 member itself has trailing alignment padding after tos. */
++  for( ulong i=offsetof(struct ethtool_tcpip4_spec,tos)+sizeof(expected.h_u.udp_ip4_spec.tos);
++       i<sizeof(struct ethtool_tcpip4_spec); i++ ) {
++    bad = captured;
++    ((uchar *)&bad.h_u)[i] = 0x55U;
++    ((uchar *)&bad.m_u)[i] = 0xaaU;
++    FD_TEST( iavf_pf_ntuple_rule_equal( &expected, &bad ) );
++  }
++  printf( "pass: captured readback, %lu negative mutations, inactive-tail/padding cases\n", rejected );
++  return 0;
++}

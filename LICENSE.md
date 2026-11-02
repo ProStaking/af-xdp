@@ -17,3 +17,7 @@ The base service and preparation-unit excerpts in `x710/configs/measured-service
 ## Broadcom P4 additions
 
 The `bnxt-p4/` package has a component-specific [license map](bnxt-p4/LICENSE-MAP.md). Driver derivative patch/test material retains GPL terms; Firedancer derivative patch/test material retains Apache-2.0 and its notices. Original package scripts/configuration use MIT and original documentation/data use CC BY 4.0. Repository defaults do not override upstream licenses.
+
+## Native Intel additions
+
+The `intel-native/i40e/` package retains Apache-2.0 for upstream-derived Firedancer patch material and preserves its license and notices. See [component provenance](intel-native/i40e/PROVENANCE.md). Repository defaults apply only to original material and do not override upstream rights.
